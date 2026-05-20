@@ -1,186 +1,315 @@
-import re
-import time
-from datetime import datetime
-from fastapi import FastAPI, HTTPException, status
+"""
+NIT — Núcleo Inteligente de Tráfego
+Backend FastAPI — main.py
+Deploy: Railway (HTTPS nativo)
+Firebase: Admin SDK (acesso mestre via credentials.json)
+"""
+
+from fastapi import FastAPI, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
+from typing import Optional, Literal
+import time, logging, os, re
+from datetime import datetime
+import pytz
 
-# Imports internos do seu projeto
-from database import inicializar_firebase
-from schemas import DespachoOcorrencia
+from database import get_db
 
-app = FastAPI(title="NIT - Núcleo Inteligente de Tráfego API")
+# ──────────────────────────────────────────────
+#  LOGGING
+# ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [NIT] %(levelname)s %(message)s"
+)
+log = logging.getLogger("nit")
 
-# Configuração de CORS (Essencial para o GitHub Pages conversar com o seu Python local/nuvem)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Permite que qualquer origem acesse durante os testes
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# ──────────────────────────────────────────────
+#  APP
+# ──────────────────────────────────────────────
+app = FastAPI(
+    title="NIT API",
+    description="Núcleo Inteligente de Tráfego — AMC Fortaleza",
+    version="1.1.0",
 )
 
-# Inicializa o Firebase com o acesso mestre
-db = inicializar_firebase()
+# ──────────────────────────────────────────────
+#  CORS — restritivo (não mais "*")
+# ──────────────────────────────────────────────
+ALLOWED_ORIGINS = [
+    "https://crisstiano07.github.io",  # produção + homologação
+    "http://127.0.0.1:5500",  # Live Server VS Code
+    "http://localhost:5500",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
 
-# =====================================================================
-# 1. SCHEMAS DE VALIDAÇÃO (PYDANTIC)
-# =====================================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "X-NIT-Key"],
+)
+
+# ──────────────────────────────────────────────
+#  API KEY — lida da variável de ambiente
+# ──────────────────────────────────────────────
+NIT_API_KEY = os.environ.get("NIT_API_KEY", "")
 
 
-class NITResponse(BaseModel):
-    """Modelo unificado de resposta da API para o Frontend"""
+def verificar_api_key(x_nit_key: Optional[str] = Header(default=None)):
+    """
+    Dependência de autenticação injetada em todas as rotas operacionais.
+    Retorna 403 se o header estiver ausente ou a chave for inválida.
+    NIT_API_KEY vazia desativa a verificação apenas em dev local sem variável.
+    """
+    if not NIT_API_KEY:
+        # Variável não configurada — modo dev sem proteção
+        log.warning("NIT_API_KEY não configurada — autenticação desativada")
+        return
+    if x_nit_key != NIT_API_KEY:
+        log.warning("Tentativa com chave inválida: %s", x_nit_key)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chave de API inválida ou ausente.",
+        )
 
+
+# ──────────────────────────────────────────────
+#  SCHEMAS — base compartilhada
+# ──────────────────────────────────────────────
+def _validar_cod(v: str) -> str:
+    v = v.strip().upper()
+    if not re.match(r"^[A-Z0-9]{1,20}$", v):
+        raise ValueError("cod deve ser alfanumérico sem espaços (ex: A14, B03)")
+    return v
+
+
+class CodBase(BaseModel):
+    cod: str = Field(
+        ..., min_length=1, max_length=20, description="Código da ocorrência"
+    )
+
+    @validator("cod")
+    def cod_alfanumerico(cls, v):
+        return _validar_cod(v)
+
+
+class DespachoOcorrencia(CodBase):
+    eq: str = Field(..., min_length=1, max_length=60, description="Equipe / agente")
+    vt: str = Field("N/I", max_length=20, description="Viatura")
+    sub: Literal["vl", "amc"] = Field(..., description="vl=Via Livre, amc=AMC")
+
+    @validator("eq")
+    def eq_sem_html(cls, v):
+        if "<" in v or ">" in v:
+            raise ValueError("eq não pode conter HTML")
+        return v.strip()
+
+    @validator("vt")
+    def vt_normalizar(cls, v):
+        return v.strip() or "N/I"
+
+
+class NormalizarOcorrencia(CodBase):
+    fim: Optional[str] = Field(
+        default=None,
+        description="Horário de normalização HH:MM — se omitido, gerado server-side (Fortaleza BRT-3)",
+    )
+
+    @validator("fim")
+    def fim_formato(cls, v):
+        if v is not None:
+            v = v.strip()
+            if not re.match(r"^\d{2}:\d{2}$", v):
+                raise ValueError("fim deve estar no formato HH:MM")
+        return v
+
+
+class ReativarOcorrencia(CodBase):
+    pass  # cod herdado — reativar não tem parâmetros variáveis
+
+
+class DespachoResponse(BaseModel):
     ok: bool
     cod: str
     ts: int
     msg: str
 
 
-def validar_cod(v: str) -> str:
-    """Sanitiza e valida o padrão alfanumérico do código da ocorrência"""
-    if not v:
-        raise ValueError("O código da ocorrência não pode ser vazio.")
-    # Remove espaços extras e força caixa alta para manter o padrão do NIT
-    return re.sub(r"\s+", "", v).upper()
+# ──────────────────────────────────────────────
+#  HELPERS
+# ──────────────────────────────────────────────
+TZ_FORTALEZA = pytz.timezone("America/Fortaleza")
 
 
-class CodBase(BaseModel):
-    cod: str = Field(..., min_length=1, max_length=30)
-
-    # Aplica o validador compartilhado para garantir consistência DRY
-    _validate_cod = validator("cod", allow_reuse=True)(validar_cod)
+def _agora_fortaleza() -> str:
+    """Retorna HH:MM no fuso de Fortaleza (BRT-3, sem horário de verão)."""
+    return datetime.now(TZ_FORTALEZA).strftime("%H:%M")
 
 
-class NormalizarOcorrencia(CodBase):
-    fim: str | None = Field(None, description="Horário de término opcional (HH:MM)")
-
-    @validator("fim")
-    def validar_formato_hora(cls, v):
-        if v is not None:
-            if not re.match(r"^\d{2}:\d{2}$", v):
-                raise ValueError("O horário de término deve seguir o formato HH:MM")
-        return v
+def _ts_ms() -> int:
+    return int(time.time() * 1000)
 
 
-class ReativarOcorrencia(CodBase):
-    pass  # Reativar usa apenas o 'cod' herdado de CodBase
-
-
-# =====================================================================
-# 2. ROTAS OPERACIONAIS DO SISTEMA
-# =====================================================================
-
-
-@app.post("/despacho", response_model=NITResponse)
-async def registrar_despacho(dados: DespachoOcorrencia):
-    try:
-        # Força a sanitização do código vindo do schema externo
-        cod_sanitizado = validar_cod(dados.cod)
-        ref = db.reference(f"/ocorrencias/{cod_sanitizado}")
-
-        ts_atual = int(time.time() * 1000)
-
-        payload = {
-            "eq": dados.eq,
-            "vt": dados.vt,
-            "sub": dados.sub,
-            "pl": "atend",  # Move o card para a coluna de atendimento
-            "ts": ts_atual,
-        }
-
-        ref.update(payload)
-        db.reference("meta").update({"lastUpdate": ts_atual})
-
-        return NITResponse(
-            ok=True,
-            cod=cod_sanitizado,
-            ts=ts_atual,
-            msg=f"Ocorrência {cod_sanitizado} despachada com sucesso.",
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro no Firebase Admin: {str(e)}",
-        )
-
-
-@app.post("/normalizar", response_model=NITResponse)
-async def normalizar_despacho(payload: NormalizarOcorrencia):
-    ref_ocorrencia = db.reference(f"ocorrencias/{payload.cod}")
-
-    # [FILTRO 1] Verificação de Existência (Evita nós fantasmas)
-    dados_atuais = ref_ocorrencia.get()
-    if dados_atuais is None:
+def _get_card(db, cod: str) -> dict:
+    """
+    Lê o nó /ocorrencias/{cod} do Firebase.
+    Lança 404 se não existir — evita criação de nó fantasma.
+    """
+    snapshot = db.reference(f"ocorrencias/{cod}").get()
+    if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Ocorrência {payload.cod} não foi encontrada no sistema.",
+            detail=f"Ocorrência '{cod}' não encontrada no Firebase.",
         )
-
-    # [FILTRO 2] State Guard (Proteção contra double-click)
-    if dados_atuais.get("pl") == "norm":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"A ocorrência {payload.cod} já se encontra normalizada.",
-        )
-
-    ts_atual = int(time.time() * 1000)
-    hora_servidor = datetime.now().strftime("%H:%M")
-
-    # Define o horário final (usa o enviado pelo front ou gera no servidor)
-    horario_fim = payload.fim if payload.fim else hora_servidor
-
-    # [PERSISTÊNCIA INCREMENTAL] Altera APENAS o necessário. 'sub' fica intacto.
-    payload_atualizacao = {"pl": "norm", "fim": horario_fim, "ts": ts_atual}
-
-    # TODO: Futuramente, calcular a métrica de duração aqui (fim - ini)
-
-    ref_ocorrencia.update(payload_atualizacao)
-    db.reference("meta").update({"lastUpdate": ts_atual})
-
-    return NITResponse(
-        ok=True,
-        cod=payload.cod,
-        ts=ts_atual,
-        msg=f"Ocorrência {payload.cod} normalizada com sucesso às {horario_fim}.",
-    )
+    return snapshot
 
 
-@app.post("/reativar", response_model=NITResponse)
-async def reativar_despacho(payload: ReativarOcorrencia):
-    ref_ocorrencia = db.reference(f"ocorrencias/{payload.cod}")
+# ──────────────────────────────────────────────
+#  ROTAS
+# ──────────────────────────────────────────────
+@app.get("/", tags=["health"])
+def health():
+    return {"status": "online", "sistema": "NIT API v1.1"}
 
-    # [FILTRO 1] Verificação de Existência
-    dados_atuais = ref_ocorrencia.get()
-    if dados_atuais is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Ocorrência {payload.cod} não existe para ser reativada.",
-        )
 
-    # [FILTRO 2] State Guard (Evita reativar o que já está ativo)
-    if dados_atuais.get("pl") == "atend":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"A ocorrência {payload.cod} já está ativa em atendimento.",
-        )
+@app.post(
+    "/despacho",
+    response_model=DespachoResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["semaforo"],
+    summary="Despacha equipe para uma ocorrência semafórica",
+)
+def despacho(
+    payload: DespachoOcorrencia,
+    x_nit_key: Optional[str] = Header(default=None),
+):
+    verificar_api_key(x_nit_key)
+    db = get_db()
+    ts = _ts_ms()
+    cod = payload.cod
 
-    ts_atual = int(time.time() * 1000)
+    # 404 se card não existe
+    _get_card(db, cod)
 
-    # [PERSISTÊNCIA INCREMENTAL] Joga para 'atend' e limpa o 'fim' antigo
-    payload_atualizacao = {
-        "pl": "atend",
-        "fim": None,  # Limpa o registro para o card voltar à linha do tempo ativa
-        "ts": ts_atual,
+    updates = {
+        f"ocorrencias/{cod}/eq": payload.eq,
+        f"ocorrencias/{cod}/vt": payload.vt,
+        f"ocorrencias/{cod}/sub": payload.sub,
+        f"ocorrencias/{cod}/pl": "atend",
+        f"ocorrencias/{cod}/ts": ts,
+        "meta/lastUpdate": ts,
     }
+    try:
+        db.reference("/").update(updates)
+        log.info("DESPACHO OK | cod=%s eq=%s sub=%s", cod, payload.eq, payload.sub)
+    except Exception as e:
+        log.error("DESPACHO FAIL | cod=%s erro=%s", cod, e)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
-    ref_ocorrencia.update(payload_atualizacao)
-    db.reference("meta").update({"lastUpdate": ts_atual})
-
-    return NITResponse(
-        ok=True,
-        cod=payload.cod,
-        ts=ts_atual,
-        msg=f"Ocorrência {payload.cod} reativada com sucesso. Retornada para a coluna de Atendimento.",
+    return DespachoResponse(
+        ok=True, cod=cod, ts=ts, msg=f"Despacho de {cod} registrado."
     )
+
+
+@app.post(
+    "/normalizar",
+    response_model=DespachoResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["semaforo"],
+    summary="Normaliza uma ocorrência semafórica",
+)
+def normalizar(
+    payload: NormalizarOcorrencia,
+    x_nit_key: Optional[str] = Header(default=None),
+):
+    verificar_api_key(x_nit_key)
+    db = get_db()
+    ts = _ts_ms()
+    cod = payload.cod
+
+    # 404 se não existe
+    card = _get_card(db, cod)
+
+    # 409 se já normalizado
+    if card.get("pl") == "norm":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ocorrência '{cod}' já está normalizada.",
+        )
+
+    # fim: usa valor enviado ou gera server-side (Fortaleza BRT-3)
+    fim = payload.fim or _agora_fortaleza()
+
+    # sub NÃO está no payload — não é tocado pelo update()
+    updates = {
+        f"ocorrencias/{cod}/pl": "norm",
+        f"ocorrencias/{cod}/fim": fim,
+        f"ocorrencias/{cod}/ts": ts,
+        "meta/lastUpdate": ts,
+    }
+    try:
+        db.reference("/").update(updates)
+        log.info("NORMALIZAR OK | cod=%s fim=%s", cod, fim)
+    except Exception as e:
+        log.error("NORMALIZAR FAIL | cod=%s erro=%s", cod, e)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    return DespachoResponse(ok=True, cod=cod, ts=ts, msg=f"{cod} normalizado às {fim}.")
+
+
+@app.post(
+    "/reativar",
+    response_model=DespachoResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["semaforo"],
+    summary="Reativa uma ocorrência normalizada para espera",
+)
+def reativar(
+    payload: ReativarOcorrencia,
+    x_nit_key: Optional[str] = Header(default=None),
+):
+    verificar_api_key(x_nit_key)
+    db = get_db()
+    ts = _ts_ms()
+    cod = payload.cod
+
+    # 404 se não existe
+    card = _get_card(db, cod)
+
+    # 409 se já está em espera
+    if card.get("pl") == "espera":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ocorrência '{cod}' já está em espera.",
+        )
+
+    # sub e eq/vt preservados — update() incremental não os toca
+    updates = {
+        f"ocorrencias/{cod}/pl": "espera",
+        f"ocorrencias/{cod}/fim": None,  # limpa horário de normalização
+        f"ocorrencias/{cod}/ts": ts,
+        "meta/lastUpdate": ts,
+    }
+    try:
+        db.reference("/").update(updates)
+        log.info("REATIVAR OK | cod=%s", cod)
+    except Exception as e:
+        log.error("REATIVAR FAIL | cod=%s erro=%s", cod, e)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    return DespachoResponse(
+        ok=True, cod=cod, ts=ts, msg=f"{cod} reativado para espera."
+    )
+
+
+# ──────────────────────────────────────────────
+#  ROTA FUTURA — ingestão de relatórios WhatsApp
+# ──────────────────────────────────────────────
+# @app.post("/ingestao/whatsapp")
+# def ingestao_whatsapp(raw: RawRelatorio):
+#     ocorrencias = parser_cemob(raw.texto)
+#     for oc in ocorrencias:
+#         db.reference(f"ocorrencias/{oc.cod}").set(oc.dict())
+#     return {"ingeridos": len(ocorrencias)}
