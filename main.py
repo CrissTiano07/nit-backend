@@ -98,7 +98,9 @@ class CodBase(BaseModel):
 class DespachoOcorrencia(CodBase):
     eq: str = Field(..., min_length=1, max_length=60, description="Equipe / agente")
     vt: str = Field("N/I", max_length=20, description="Viatura")
-    sub: Literal["vl", "amc"] = Field(..., description="vl=Via Livre, amc=AMC")
+    sub: Literal["vl", "amc", "sn"] = Field(
+        ..., description="vl=Via Livre, amc=AMC, sn=Sem Necessidade"
+    )
 
     @validator("eq")
     def eq_sem_html(cls, v):
@@ -193,24 +195,28 @@ def despacho(
     # 404 se card não existe
     _get_card(db, cod)
 
+    # pl depende do sub: 'sn' é um estado próprio, não 'atend'
+    pl = "sn" if payload.sub == "sn" else "atend"
+
     updates = {
         f"ocorrencias/{cod}/eq": payload.eq,
         f"ocorrencias/{cod}/vt": payload.vt,
-        f"ocorrencias/{cod}/sub": payload.sub,
-        f"ocorrencias/{cod}/pl": "atend",
+        f"ocorrencias/{cod}/sub": payload.sub if payload.sub != "sn" else None,
+        f"ocorrencias/{cod}/pl": pl,
         f"ocorrencias/{cod}/ts": ts,
         "meta/lastUpdate": ts,
     }
     try:
         db.reference("/").update(updates)
-        log.info("DESPACHO OK | cod=%s eq=%s sub=%s", cod, payload.eq, payload.sub)
+        log.info(
+            "DESPACHO OK | cod=%s eq=%s sub=%s pl=%s", cod, payload.eq, payload.sub, pl
+        )
     except Exception as e:
         log.error("DESPACHO FAIL | cod=%s erro=%s", cod, e)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
-    return DespachoResponse(
-        ok=True, cod=cod, ts=ts, msg=f"Despacho de {cod} registrado."
-    )
+    acao = "Sem necessidade" if pl == "sn" else f"despachado → {payload.sub.upper()}"
+    return DespachoResponse(ok=True, cod=cod, ts=ts, msg=f"{cod} {acao}.")
 
 
 @app.post(
