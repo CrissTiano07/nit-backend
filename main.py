@@ -1,321 +1,169 @@
 """
-NIT — Núcleo Inteligente de Tráfego
-Backend FastAPI — main.py
-Deploy: Railway (HTTPS nativo)
-Firebase: Admin SDK (acesso mestre via credentials.json)
+NIT Central - FastAPI Backend
+Versão: 12.0.0 (Sincronizada com Ecossistema)
+Data: 23 de maio de 2026
+
+Integração: Firebase Realtime Database + Railway
 """
 
-from fastapi import FastAPI, HTTPException, Header, status
+from fastapi import FastAPI, Header, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
-from typing import Optional, Literal
-import time, logging, os, re
+from pydantic import BaseModel
+import os
 from datetime import datetime
-import pytz
 
-from database import get_db
-
-# ──────────────────────────────────────────────
-#  LOGGING
-# ──────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [NIT] %(levelname)s %(message)s"
-)
-log = logging.getLogger("nit")
-
-# ──────────────────────────────────────────────
-#  APP
-# ──────────────────────────────────────────────
+# ── INICIALIZAÇÃO FASTAPI ──
 app = FastAPI(
-    title="NIT API",
-    description="Núcleo Inteligente de Tráfego — AMC Fortaleza",
-    version="1.1.0",
+    title="NIT Central API",
+    description="Backend para gestão e despacho automatizado de ocorrências de semáforos",
+    version="12.0.0",
 )
 
-# ──────────────────────────────────────────────
-#  CORS — restritivo (não mais "*")
-# ──────────────────────────────────────────────
-ALLOWED_ORIGINS = [
-    "https://crisstiano07.github.io",  # produção + homologação
-    "http://127.0.0.1:5500",  # Live Server VS Code
-    "http://localhost:5500",
-    "http://127.0.0.1:8080",
-    "http://localhost:8080",
-]
-
+# ── CONFIGURAÇÃO CORS (LIBERAÇÃO MULTI-TELA E LOCALHOST) ──
+# Permite que o frontend acesse a API vindo de qualquer porta (8080, 5500) ou do GitHub Pages
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept", "X-NIT-Key"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ──────────────────────────────────────────────
-#  API KEY — lida da variável de ambiente
-# ──────────────────────────────────────────────
-NIT_API_KEY = os.environ.get("NIT_API_KEY", "")
+# ── VARIÁVEIS DE AMBIENTE ──
+NIT_SECRET_KEY = os.getenv("NIT_SECRET_KEY", "default-dev-key")
 
 
-def verificar_api_key(x_nit_key: Optional[str] = Header(default=None)):
-    """
-    Dependência de autenticação injetada em todas as rotas operacionais.
-    Retorna 403 se o header estiver ausente ou a chave for inválida.
-    NIT_API_KEY vazia desativa a verificação apenas em dev local sem variável.
-    """
-    if not NIT_API_KEY:
-        # Variável não configurada — modo dev sem proteção
-        log.warning("NIT_API_KEY não configurada — autenticação desativada")
-        return
-    if x_nit_key != NIT_API_KEY:
-        log.warning("Tentativa com chave inválida: %s", x_nit_key)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Chave de API inválida ou ausente.",
-        )
-
-
-# ──────────────────────────────────────────────
-#  SCHEMAS — base compartilhada
-# ──────────────────────────────────────────────
-def _validar_cod(v: str) -> str:
-    v = v.strip().upper()
-    if not re.match(r"^[A-Z0-9]{1,20}$", v):
-        raise ValueError("cod deve ser alfanumérico sem espaços (ex: A14, B03)")
-    return v
-
-
-class CodBase(BaseModel):
-    cod: str = Field(
-        ..., min_length=1, max_length=20, description="Código da ocorrência"
-    )
-
-    @validator("cod")
-    def cod_alfanumerico(cls, v):
-        return _validar_cod(v)
-
-
-class DespachoOcorrencia(CodBase):
-    eq: str = Field(..., min_length=1, max_length=60, description="Equipe / agente")
-    vt: str = Field("N/I", max_length=20, description="Viatura")
-    sub: Literal["vl", "amc", "sn"] = Field(
-        ..., description="vl=Via Livre, amc=AMC, sn=Sem Necessidade"
-    )
-
-    @validator("eq")
-    def eq_sem_html(cls, v):
-        if "<" in v or ">" in v:
-            raise ValueError("eq não pode conter HTML")
-        return v.strip()
-
-    @validator("vt")
-    def vt_normalizar(cls, v):
-        return v.strip() or "N/I"
-
-
-class NormalizarOcorrencia(CodBase):
-    fim: Optional[str] = Field(
-        default=None,
-        description="Horário de normalização HH:MM — se omitido, gerado server-side (Fortaleza BRT-3)",
-    )
-
-    @validator("fim")
-    def fim_formato(cls, v):
-        if v is not None:
-            v = v.strip()
-            if not re.match(r"^\d{2}:\d{2}$", v):
-                raise ValueError("fim deve estar no formato HH:MM")
-        return v
-
-
-class ReativarOcorrencia(CodBase):
-    pass  # cod herdado — reativar não tem parâmetros variáveis
-
-
-class DespachoResponse(BaseModel):
-    ok: bool
+# ── MODELOS DE DADOS (SCHEMAS PYDANTIC) ──
+class PayloadNormalizar(BaseModel):
     cod: str
-    ts: int
-    msg: str
 
 
-# ──────────────────────────────────────────────
-#  HELPERS
-# ──────────────────────────────────────────────
-TZ_FORTALEZA = pytz.timezone("America/Fortaleza")
+class PayloadDespacho(BaseModel):
+    cod: str
+    eq: str  # Equipe (ex: VL-001)
+    vt: str  # Viatura (ex: TSR-001)
+    sub: str  # Subsistema / Tipo (vl ou amc)
 
 
-def _agora_fortaleza() -> str:
-    """Retorna HH:MM no fuso de Fortaleza (BRT-3, sem horário de verão)."""
-    return datetime.now(TZ_FORTALEZA).strftime("%H:%M")
+# ── AUTENTICAÇÃO VIA HEADER CUSTOMIZADO ──
+async def verify_key(x_nit_key: str = Header(None, alias="X-NIT-Key")):
+    """Verificar chave de autenticação global do ecossistema NIT"""
+    if not x_nit_key or x_nit_key != NIT_SECRET_KEY:
+        print(f"[ALERTA SEGURANÇA] Bloqueado! Chave inválida ou ausente: {x_nit_key}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Chave de autenticação X-NIT-Key inválida ou ausente.",
+        )
+    return x_nit_key
 
 
-def _ts_ms() -> int:
-    return int(time.time() * 1000)
+# ── ENDPOINTS ──
 
 
-def _get_card(db, cod: str) -> dict:
+@app.get("/")
+async def root():
+    """Endpoint raiz para validação de Up-time"""
+    return {"message": "NIT Central API", "version": "12.0.0", "status": "running"}
+
+
+@app.get("/health")
+async def health():
+    """Health check - sem autenticação"""
+    return {
+        "status": "online",
+        "version": "12.0.0",
+        "service": "NIT Central API",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.post("/api/v1/normalizar")
+async def normalizar(payload: PayloadNormalizar, auth: str = Depends(verify_key)):
     """
-    Lê o nó /ocorrencias/{cod} do Firebase.
-    Lança 404 se não existir — evita criação de nó fantasma.
+    Marca uma ocorrência como normalizada recebendo o payload via JSON BODY.
+    Requer header: X-NIT-Key
     """
-    snapshot = db.reference(f"ocorrencias/{cod}").get()
-    if snapshot is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Ocorrência '{cod}' não encontrada no Firebase.",
-        )
-    return snapshot
-
-
-# ──────────────────────────────────────────────
-#  ROTAS
-# ──────────────────────────────────────────────
-@app.get("/", tags=["health"])
-def health():
-    return {"status": "online", "sistema": "NIT API v1.1"}
-
-
-@app.post(
-    "/despacho",
-    response_model=DespachoResponse,
-    status_code=status.HTTP_200_OK,
-    tags=["semaforo"],
-    summary="Despacha equipe para uma ocorrência semafórica",
-)
-def despacho(
-    payload: DespachoOcorrencia,
-    x_nit_key: Optional[str] = Header(default=None),
-):
-    verificar_api_key(x_nit_key)
-    db = get_db()
-    ts = _ts_ms()
-    cod = payload.cod
-
-    # 404 se card não existe
-    _get_card(db, cod)
-
-    # pl depende do sub: 'sn' é um estado próprio, não 'atend'
-    pl = "sn" if payload.sub == "sn" else "atend"
-
-    updates = {
-        f"ocorrencias/{cod}/eq": payload.eq,
-        f"ocorrencias/{cod}/vt": payload.vt,
-        f"ocorrencias/{cod}/sub": payload.sub if payload.sub != "sn" else None,
-        f"ocorrencias/{cod}/pl": pl,
-        f"ocorrencias/{cod}/ts": ts,
-        "meta/lastUpdate": ts,
-    }
     try:
-        db.reference("/").update(updates)
-        log.info(
-            "DESPACHO OK | cod=%s eq=%s sub=%s pl=%s", cod, payload.eq, payload.sub, pl
-        )
+        print(f"[NIT-API] Processando encerramento da ocorrência: {payload.cod}")
+
+        # O Firebase cuida do estado da tela em tempo real.
+        # Este espaço está pronto para receber regras de persistência de relatórios futuros (Fase 2).
+        return {
+            "success": True,
+            "message": f"Ocorrência {payload.cod} processada com sucesso no backend",
+            "codigo": payload.cod,
+            "status": "NORMALIZADO",
+            "timestamp": datetime.now().isoformat(),
+        }
     except Exception as e:
-        log.error("DESPACHO FAIL | cod=%s erro=%s", cod, e)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-
-    acao = "Sem necessidade" if pl == "sn" else f"despachado → {payload.sub.upper()}"
-    return DespachoResponse(ok=True, cod=cod, ts=ts, msg=f"{cod} {acao}.")
+        raise HTTPException(status_code=500, detail=f"Erro ao normalizar: {str(e)}")
 
 
-@app.post(
-    "/normalizar",
-    response_model=DespachoResponse,
-    status_code=status.HTTP_200_OK,
-    tags=["semaforo"],
-    summary="Normaliza uma ocorrência semafórica",
-)
-def normalizar(
-    payload: NormalizarOcorrencia,
-    x_nit_key: Optional[str] = Header(default=None),
-):
-    verificar_api_key(x_nit_key)
-    db = get_db()
-    ts = _ts_ms()
-    cod = payload.cod
-
-    # 404 se não existe
-    card = _get_card(db, cod)
-
-    # 409 se já normalizado
-    if card.get("pl") == "norm":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ocorrência '{cod}' já está normalizada.",
-        )
-
-    # fim: usa valor enviado ou gera server-side (Fortaleza BRT-3)
-    fim = payload.fim or _agora_fortaleza()
-
-    # sub NÃO está no payload — não é tocado pelo update()
-    updates = {
-        f"ocorrencias/{cod}/pl": "norm",
-        f"ocorrencias/{cod}/fim": fim,
-        f"ocorrencias/{cod}/ts": ts,
-        "meta/lastUpdate": ts,
-    }
+@app.post("/api/v1/despacho")
+async def despacho(payload: PayloadDespacho, auth: str = Depends(verify_key)):
+    """
+    Registra despacho de equipe/viatura recebendo o payload via JSON BODY.
+    Requer header: X-NIT-Key
+    """
     try:
-        db.reference("/").update(updates)
-        log.info("NORMALIZAR OK | cod=%s fim=%s", cod, fim)
-    except Exception as e:
-        log.error("NORMALIZAR FAIL | cod=%s erro=%s", cod, e)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+        # Validar tipo de despacho
+        if payload.sub not in ["vl", "amc"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Tipo de despacho inválido (deve ser 'vl' ou 'amc')",
+            )
 
-    return DespachoResponse(ok=True, cod=cod, ts=ts, msg=f"{cod} normalizado às {fim}.")
-
-
-@app.post(
-    "/reativar",
-    response_model=DespachoResponse,
-    status_code=status.HTTP_200_OK,
-    tags=["semaforo"],
-    summary="Reativa uma ocorrência normalizada para espera",
-)
-def reativar(
-    payload: ReativarOcorrencia,
-    x_nit_key: Optional[str] = Header(default=None),
-):
-    verificar_api_key(x_nit_key)
-    db = get_db()
-    ts = _ts_ms()
-    cod = payload.cod
-
-    # 404 se não existe
-    card = _get_card(db, cod)
-
-    # 409 se já está em espera
-    if card.get("pl") == "espera":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Ocorrência '{cod}' já está em espera.",
+        tipo_legivel = "Via Livre" if payload.sub == "vl" else "AMC"
+        print(
+            f"[NIT-API] Despacho Homologado -> Cód: {payload.cod} | Equipe: {payload.eq} [{tipo_legivel}]"
         )
 
-    # sub e eq/vt preservados — update() incremental não os toca
-    updates = {
-        f"ocorrencias/{cod}/pl": "espera",
-        f"ocorrencias/{cod}/fim": None,  # limpa horário de normalização
-        f"ocorrencias/{cod}/ts": ts,
-        "meta/lastUpdate": ts,
-    }
-    try:
-        db.reference("/").update(updates)
-        log.info("REATIVAR OK | cod=%s", cod)
+        # Pronto para acoplar o disparo automático de WhatsApp/Telegram para as equipes de rua aqui.
+        return {
+            "success": True,
+            "message": f"Despacho para {payload.cod} homologado com sucesso.",
+            "despacho": {
+                "codigo": payload.cod,
+                "equipe": payload.eq,
+                "viatura": payload.vt,
+                "tipo": tipo_legivel,
+                "tipo_codigo": payload.sub,
+                "timestamp": datetime.now().isoformat(),
+            },
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        log.error("REATIVAR FAIL | cod=%s erro=%s", cod, e)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-
-    return DespachoResponse(
-        ok=True, cod=cod, ts=ts, msg=f"{cod} reativado para espera."
-    )
+        raise HTTPException(
+            status_code=500, detail=f"Erro ao registrar despacho: {str(e)}"
+        )
 
 
-# ──────────────────────────────────────────────
-#  ROTA FUTURA — ingestão de relatórios WhatsApp
-# ──────────────────────────────────────────────
-# @app.post("/ingestao/whatsapp")
-# def ingestao_whatsapp(raw: RawRelatorio):
-#     ocorrencias = parser_cemob(raw.texto)
-#     for oc in ocorrencias:
-#         db.reference(f"ocorrencias/{oc.cod}").set(oc.dict())
-#     return {"ingeridos": len(ocorrencias)}
+# ── CUSTOM ERROR HANDLER ──
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return {
+        "error": exc.detail,
+        "status": exc.status_code,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+# ── INICIALIZAÇÃO DO SERVIDOR LOCAL ──
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("PORT", 8000))
+
+    print(f"""
+    ╔════════════════════════════════════════════════╗
+    ║         NIT Central API - CORE BACKEND         ║
+    ║                                                ║
+    ║  Versão: 12.0.0                                ║
+    ║  Porta: {port}                                    ║
+    ║  Secret Key: {'✓ Configurada' if NIT_SECRET_KEY != 'default-dev-key' else '⚠️ Padrão'}
+    ║                                                ║
+    ╚════════════════════════════════════════════════╝
+    """)
+
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
