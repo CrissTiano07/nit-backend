@@ -1,18 +1,15 @@
-# Usa uma imagem oficial estável do Python 3.12
+# Use uma versão específica e estável do Python
 FROM python:3.12-slim
 
-# Define o diretório de trabalho dentro do container
+# Define a pasta de trabalho
 WORKDIR /app
 
-# Instala dependências antes de copiar o código (otimização de cache do Docker)
+# Copia e instala as dependências
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia todo o resto do código para dentro do container
+# Copia o código fonte
 COPY . .
-
-# Expõe a porta que o FastAPI usa
-EXPOSE 8000
 
 # Comando para rodar a aplicação
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
