@@ -9,6 +9,7 @@ Integração: Firebase Realtime Database + Railway
 from fastapi import FastAPI, Header, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pydantic_settings import BaseSettings
 import os
 from datetime import datetime
 
@@ -152,8 +153,7 @@ async def http_exception_handler(request, exc):
 # ── INICIALIZAÇÃO DO SERVIDOR LOCAL ──
 if __name__ == "__main__":
     import uvicorn
-
-    port = int(os.getenv("PORT", 8000))
+    import os
 
     print(f"""
     ╔════════════════════════════════════════════════╗
