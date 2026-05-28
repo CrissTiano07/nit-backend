@@ -1,27 +1,32 @@
 """
 NIT Central - FastAPI Backend
-Versão: 12.0.0 (Sincronizada com Ecossistema)
-Data: 23 de maio de 2026
+Versao: 12.0.0 (Sincronizada com Ecossistema)
+Data: 28 de maio de 2026
 
-Integração: Firebase Realtime Database + Railway
+Integracao: Firebase Realtime Database + Railway
 """
 
 from fastapi import FastAPI, Header, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from pydantic_settings import BaseSettings
 import os
 from datetime import datetime
+import logging
 
-# ── INICIALIZAÇÃO FASTAPI ──
+# ── CONFIGURACAO DE LOGS ──
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ── INICIALIZACAO FASTAPI ──
 app = FastAPI(
     title="NIT Central API",
-    description="Backend para gestão e despacho automatizado de ocorrências de semáforos",
+    description="Backend para gestao e despacho automatizado de ocorrencias de semaforos",
     version="12.0.0",
 )
 
-# ── CONFIGURAÇÃO CORS (LIBERAÇÃO MULTI-TELA E LOCALHOST) ──
-# Permite que o frontend acesse a API vindo de qualquer porta (8080, 5500) ou do GitHub Pages
+# ── CONFIGURACAO CORS ──
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,11 +35,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── VARIÁVEIS DE AMBIENTE ──
+# ── VARIAVEIS DE AMBIENTE ──
 NIT_SECRET_KEY = os.getenv("NIT_SECRET_KEY", "default-dev-key")
+RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", False)
 
 
-# ── MODELOS DE DADOS (SCHEMAS PYDANTIC) ──
+# ── MODELOS DE DADOS ──
 class PayloadNormalizar(BaseModel):
     cod: str
 
@@ -46,16 +52,33 @@ class PayloadDespacho(BaseModel):
     sub: str  # Subsistema / Tipo (vl ou amc)
 
 
-# ── AUTENTICAÇÃO VIA HEADER CUSTOMIZADO ──
+# ── AUTENTICACAO ──
 async def verify_key(x_nit_key: str = Header(None, alias="X-NIT-Key")):
-    """Verificar chave de autenticação global do ecossistema NIT"""
+    """Verificar chave de autenticacao global do ecossistema NIT"""
     if not x_nit_key or x_nit_key != NIT_SECRET_KEY:
-        print(f"[ALERTA SEGURANÇA] Bloqueado! Chave inválida ou ausente: {x_nit_key}")
+        logger.warning(f"[SEGURANCA] Bloqueado! Chave invalida ou ausente")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Chave de autenticação X-NIT-Key inválida ou ausente.",
+            detail="Chave de autenticacao X-NIT-Key invalida ou ausente.",
         )
     return x_nit_key
+
+
+# ── EVENTO DE STARTUP ──
+@app.on_event("startup")
+async def startup_event():
+    """Executado quando o app inicia"""
+    logger.info("🚀 NIT Central API iniciando...")
+    logger.info(f"Documentacao disponivel em /docs")
+    logger.info(f"Ambiente: {'Railway' if RAILWAY_ENVIRONMENT else 'Desenvolvimento'}")
+    logger.info("✅ NIT Central API iniciada com sucesso!")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Executado quando o app e encerrado"""
+    logger.info("🛑 NIT Central API encerrando...")
+    logger.info("✅ NIT Central API encerrada com sucesso!")
 
 
 # ── ENDPOINTS ──
@@ -63,63 +86,69 @@ async def verify_key(x_nit_key: str = Header(None, alias="X-NIT-Key")):
 
 @app.get("/")
 async def root():
-    """Endpoint raiz para validação de Up-time"""
-    return {"message": "NIT Central API", "version": "12.0.0", "status": "running"}
+    """Endpoint raiz para validacao de Up-time"""
+    return {
+        "message": "NIT Central API",
+        "version": "12.0.0",
+        "status": "running",
+        "environment": "railway" if RAILWAY_ENVIRONMENT else "development",
+    }
 
 
 @app.get("/health")
 async def health():
-    """Health check - sem autenticação"""
+    """Health check - sem autenticacao para o load balancer"""
     return {
-        "status": "online",
+        "status": "healthy",
         "version": "12.0.0",
         "service": "NIT Central API",
         "timestamp": datetime.now().isoformat(),
     }
 
 
+@app.get("/ready")
+async def ready():
+    """Readiness probe - verifica se o app esta pronto para trafego"""
+    return {
+        "ready": True,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 @app.post("/api/v1/normalizar")
 async def normalizar(payload: PayloadNormalizar, auth: str = Depends(verify_key)):
-    """
-    Marca uma ocorrência como normalizada recebendo o payload via JSON BODY.
-    Requer header: X-NIT-Key
-    """
+    """Marca uma ocorrencia como normalizada"""
     try:
-        print(f"[NIT-API] Processando encerramento da ocorrência: {payload.cod}")
+        logger.info(f"Processando encerramento da ocorrencia: {payload.cod}")
 
-        # O Firebase cuida do estado da tela em tempo real.
-        # Este espaço está pronto para receber regras de persistência de relatórios futuros (Fase 2).
         return {
             "success": True,
-            "message": f"Ocorrência {payload.cod} processada com sucesso no backend",
+            "message": f"Ocorrencia {payload.cod} processada com sucesso no backend",
             "codigo": payload.cod,
             "status": "NORMALIZADO",
             "timestamp": datetime.now().isoformat(),
         }
     except Exception as e:
+        logger.error(f"Erro ao normalizar {payload.cod}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erro ao normalizar: {str(e)}")
 
 
 @app.post("/api/v1/despacho")
 async def despacho(payload: PayloadDespacho, auth: str = Depends(verify_key)):
-    """
-    Registra despacho de equipe/viatura recebendo o payload via JSON BODY.
-    Requer header: X-NIT-Key
-    """
+    """Registra despacho de equipe/viatura"""
     try:
         # Validar tipo de despacho
         if payload.sub not in ["vl", "amc"]:
             raise HTTPException(
                 status_code=400,
-                detail="Tipo de despacho inválido (deve ser 'vl' ou 'amc')",
+                detail="Tipo de despacho invalido (deve ser 'vl' ou 'amc')",
             )
 
         tipo_legivel = "Via Livre" if payload.sub == "vl" else "AMC"
-        print(
-            f"[NIT-API] Despacho Homologado -> Cód: {payload.cod} | Equipe: {payload.eq} [{tipo_legivel}]"
+        logger.info(
+            f"Despacho Homologado -> Cod: {payload.cod} | Equipe: {payload.eq} [{tipo_legivel}]"
         )
 
-        # Pronto para acoplar o disparo automático de WhatsApp/Telegram para as equipes de rua aqui.
         return {
             "success": True,
             "message": f"Despacho para {payload.cod} homologado com sucesso.",
@@ -135,6 +164,7 @@ async def despacho(payload: PayloadDespacho, auth: str = Depends(verify_key)):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Erro ao registrar despacho: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Erro ao registrar despacho: {str(e)}"
         )
@@ -150,20 +180,31 @@ async def http_exception_handler(request, exc):
     }
 
 
-# ── INICIALIZAÇÃO DO SERVIDOR LOCAL ──
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    logger.error(f"Erro nao tratado: {str(exc)}", exc_info=True)
+    return {
+        "error": "Erro interno do servidor",
+        "status": 500,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+# ── INICIALIZACAO LOCAL (APENAS PARA TESTES) ──
 if __name__ == "__main__":
     import uvicorn
-    import os
+
+    port = int(os.getenv("PORT", 8000))
 
     print(f"""
     ╔════════════════════════════════════════════════╗
-    ║         NIT Central API - CORE BACKEND         ║
+    ║         NIT Central API - MODO LOCAL           ║
     ║                                                ║
-    ║  Versão: 12.0.0                                ║
-    ║  Porta: {port}                                    ║
-    ║  Secret Key: {'✓ Configurada' if NIT_SECRET_KEY != 'default-dev-key' else '⚠️ Padrão'}
+    ║  Versao: 12.0.0                                ║
+    ║  Porta: {port}                                 ║
+    ║  Secret Key: {'✓ Configurada' if NIT_SECRET_KEY != 'default-dev-key' else '⚠️ Padrao'}
     ║                                                ║
     ╚════════════════════════════════════════════════╝
     """)
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True, log_level="info")
