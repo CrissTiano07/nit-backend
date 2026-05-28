@@ -170,24 +170,35 @@ async def despacho(payload: PayloadDespacho, auth: str = Depends(verify_key)):
         )
 
 
-# ── CUSTOM ERROR HANDLER ──
+# ── CUSTOM ERROR HANDLER (CORRIGIDO) ──
+from fastapi.responses import JSONResponse
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    return {
-        "error": exc.detail,
-        "status": exc.status_code,
-        "timestamp": datetime.now().isoformat(),
-    }
+    """Handler personalizado para erros HTTP"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status": exc.status_code,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
 
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request, exc):
+    """Handler para erros não tratados"""
     logger.error(f"Erro nao tratado: {str(exc)}", exc_info=True)
-    return {
-        "error": "Erro interno do servidor",
-        "status": 500,
-        "timestamp": datetime.now().isoformat(),
-    }
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Erro interno do servidor",
+            "status": 500,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
 
 
 # ── INICIALIZACAO LOCAL (APENAS PARA TESTES) ──
