@@ -7,6 +7,7 @@ Integracao: Firebase Realtime Database + Railway
 """
 
 from fastapi import FastAPI, Header, HTTPException, Depends, status
+from processar_relatorio import router as relatorio_router
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -25,6 +26,7 @@ app = FastAPI(
     description="Backend para gestao e despacho automatizado de ocorrencias de semaforos",
     version="12.0.0",
 )
+app.include_router(relatorio_router)
 
 # ── CONFIGURACAO CORS ──
 app.add_middleware(
