@@ -9,7 +9,12 @@ Dependências adicionais (adicione ao requirements.txt):
     fastapi          # já deve existir
     pydantic         # já deve existir
     python-dotenv    # já deve existir
-    # NÃO precisa de slowapi — rate limiter implementado em memória pura
+    httpx            # consulta batch ao Firebase (reincidencia real)
+    # NAO precisa de slowapi — rate limiter implementado em memoria pura
+
+Variavel de ambiente adicional (Railway -> Variables):
+    FIREBASE_URL = https://nit-operacional-default-rtdb.firebaseio.com
+    (sem barra final; usada para consulta shallow de reincidencia)
 """
 
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -197,11 +202,45 @@ _RE_SEMAF = re.compile(
 )
 _RE_TIPO = re.compile(r"^([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ\s]+?)\s*🚦", re.I)
 _RE_INICIO = re.compile(r"in[íi]cio\s*:\s*(.+)", re.I)
-_RE_FIM = re.compile(r"fim\s*:\s*(.+)", re.I)
+_RE_FIM_LABEL = re.compile(r"fim\s*:\s*(.+)", re.I)
+# Extrai datas no formato dd/mm/aaaa hh:mm em qualquer posicao da linha
+_RE_DATETIME = re.compile(r"(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2})")
+# Mapa de palavras-chave para tipo normalizado
+_TIPO_MAP = [
+    ("FALHA DE EQUIPAMENTO", "FALHA DE EQUIPAMENTO"),
+    ("ENEL", "ENEL"),
+    ("INVESTIGANDO", "INVESTIGANDO"),
+    ("FURTO", "FURTO"),
+    ("IMPROCEDENTE", "IMPROCEDENTE"),
+    ("ACIDENTE", "ACIDENTE"),
+    ("VANDALISMO", "VANDALISMO"),
+]
 _RE_DIGITS = re.compile(r"\D")
 _RE_VL = re.compile(r"\bvl\b|via\s+livre", re.I)
 _RE_AMC = re.compile(r"\bamc\b", re.I)
 _RE_SN_CRZ = re.compile(r"cruzamento\s+(funcionando|normal|ok)", re.I)
+
+
+def extrair_tipo_normalizado(linha: str) -> str:
+    """Extrai tipo buscando palavras-chave na linha inteira (mais robusto que regex de prefixo)."""
+    linha_up = linha.upper()
+    for keyword, label in _TIPO_MAP:
+        if keyword in linha_up:
+            return label
+    m = _RE_TIPO.search(linha)
+    if m:
+        candidato = m.group(1).strip()
+        if candidato and candidato not in ("N/I", ""):
+            return candidato
+    return "N/I"
+
+
+def extrair_inicio_fim_inline(linha: str) -> tuple:
+    """Extrai inicio e fim de qualquer posicao na linha (dd/mm/aaaa hh:mm)."""
+    matches = _RE_DATETIME.findall(linha)
+    inicio = matches[0] if len(matches) >= 1 else None
+    fim = matches[1] if len(matches) >= 2 else None
+    return inicio, fim
 
 
 def extrair_data_referencia(linhas: List[str]) -> str:
@@ -248,12 +287,18 @@ def determinar_status(ev: dict) -> tuple[str, str]:
 def _truncar_obs(obs: str) -> str:
     """
     Trunca observações para economizar storage no Firebase.
-    Firebase Spark: 1 GB total — campos longos são o principal risco.
+    Tenta cortar no ultimo ponto final (preserva frases completas).
+    Firebase Spark: 1 GB total — campos longos sao o principal risco.
     """
     obs = obs.strip()
-    if len(obs) > _MAX_OBS_CHARS:
-        return obs[: _MAX_OBS_CHARS - 3] + "…"
-    return obs or None
+    if not obs:
+        return None
+    if len(obs) <= _MAX_OBS_CHARS:
+        return obs
+    ultimo_ponto = obs.rfind(".", 0, _MAX_OBS_CHARS)
+    if ultimo_ponto > int(_MAX_OBS_CHARS * 0.8):
+        return obs[: ultimo_ponto + 1]
+    return obs[: _MAX_OBS_CHARS - 1] + "…"
 
 
 def extrair_eventos_do_texto(texto: str) -> List[dict]:
@@ -286,19 +331,16 @@ def extrair_eventos_do_texto(texto: str) -> List[dict]:
                 if atual:
                     eventos.append(atual)
 
-                tipo_m = _RE_TIPO.search(linha_s)
-                tipo = tipo_m.group(1).strip() if tipo_m else "N/I"
-                # Tipo "INVESTIGANDO" fica na mesma linha que o emoji
-                if linha_s.upper().startswith("INVESTIGANDO"):
-                    tipo = "INVESTIGANDO"
+                tipo = extrair_tipo_normalizado(linha_s)
+                ini_inline, fim_inline = extrair_inicio_fim_inline(linha_s)
 
                 atual = {
                     "codigo": m.group(1).strip(),
                     "endereco": m.group(2).strip().replace("  ", " "),
                     "problema": m.group(3).strip().upper(),
                     "tipo": tipo,
-                    "inicio": "",
-                    "fim": "",
+                    "inicio": ini_inline or "",
+                    "fim": fim_inline or "",
                     "observacoes": (m.group(4) or "").strip().replace('"', ""),
                     "secao": secao,
                 }
@@ -313,9 +355,10 @@ def extrair_eventos_do_texto(texto: str) -> List[dict]:
             atual["inicio"] = m_ini.group(1).strip()
             continue
 
-        m_fim = _RE_FIM.search(linha_s)
+        m_fim = _RE_FIM_LABEL.search(linha_s)
         if m_fim:
-            atual["fim"] = m_fim.group(1).strip()
+            if not atual["fim"]:  # nao sobrescreve fim ja extraido inline
+                atual["fim"] = m_fim.group(1).strip()
             continue
 
         # Acumula como observação (remove aspas e espaços duplos)
@@ -368,25 +411,57 @@ async def processar_relatorio(
     if cached:
         return JSONResponse(content=cached, headers={"X-NIT-Cache": "HIT"})
 
-    # ── 4. Parsing ──
+    # ── 4. Validacao de formato antes do parsing ──
+    if "🚦" not in req.texto:
+        raise HTTPException(
+            status_code=400,
+            detail="Relatorio invalido: nao contém o marcador 🚦. Verifique se o texto foi copiado corretamente.",
+        )
+
+    # ── 5. Parsing ──
     linhas = req.texto.splitlines()
     data_ref = extrair_data_referencia(linhas)
     eventos_raw = extrair_eventos_do_texto(req.texto)
 
-    # ── 5. Proteção Firebase: limita tamanho do batch ──
-    #    Firebase Spark tem 1 GB de storage e throttle em escritas rápidas.
-    #    Relatórios CEMOB normalmente têm < 50 eventos; 200 é limite de segurança.
+    if not eventos_raw:
+        raise HTTPException(
+            status_code=422,
+            detail="Nenhuma ocorrencia encontrada. Verifique o formato do relatorio CEMOB.",
+        )
+
+    # ── 6. Protecao Firebase: limita tamanho do batch ──
     truncado = len(eventos_raw) > _MAX_EVENTOS_POR_LOTE
     eventos_raw = eventos_raw[:_MAX_EVENTOS_POR_LOTE]
 
-    # ── 6. Montagem dos eventos processados ──
-    codigos_lote: set[str] = set()
+    # ── 7. Reincidencia real: consulta batch ao Firebase (uma unica requisicao) ──
+    # Usa shallow=true para trazer apenas as chaves do /kanban, sem os valores.
+    # Economico em download; os codigos sao extraidos do prefixo do eventoId.
+    # Se FIREBASE_URL nao estiver configurada, cai para deteccao local no lote.
+    codigos_firebase: set = set()
+    firebase_url = os.getenv("FIREBASE_URL", "")
+    if firebase_url:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp_fb = await client.get(
+                    f"{firebase_url}/kanban.json",
+                    params={"shallow": "true"},
+                )
+            if resp_fb.status_code == 200:
+                for chave in resp_fb.json() or {}:
+                    codigos_firebase.add(chave.split("_")[0])
+        except Exception:
+            pass  # falha silenciosa — reincidencia cai para deteccao local
+
+    # ── 8. Montagem dos eventos processados ──
+    codigos_lote: set = set()
     eventos_processados: List[EventoProcessado] = []
 
     for ev in eventos_raw:
         ev_id = gerar_evento_id(ev["codigo"], ev["inicio"])
         status, coluna = determinar_status(ev)
-        reincidente = ev["codigo"] in codigos_lote
+        reincidente = ev["codigo"] in codigos_lote or ev["codigo"] in codigos_firebase
         codigos_lote.add(ev["codigo"])
 
         eventos_processados.append(
@@ -398,7 +473,6 @@ async def processar_relatorio(
                 tipo=ev["tipo"],
                 inicio=ev["inicio"] or None,
                 fim=ev["fim"] or None,
-                # Trunca observações — principal fonte de bloat no Firebase
                 observacoes=_truncar_obs(ev["observacoes"]),
                 status=status,
                 coluna=coluna,
