@@ -316,7 +316,11 @@ def extrair_eventos_do_texto(texto: str) -> List[dict]:
         if not linha_s:
             continue
 
-        # ── Detecta mudança de seção ──
+        # ── IGNORA LINHAS DE CABEÇALHO (NORMALIZADOS/PENDENTES) ──
+        if re.search(r"(NORMALIZADOS|PENDENTES)\s*[✅❌]?", linha_s, re.IGNORECASE):
+            continue
+
+        # ── Detecta mudança de seção (mantido para compatibilidade) ──
         if "NORMALIZADOS✅" in linha_s:
             secao = "NORMALIZADO"
             continue
@@ -357,11 +361,11 @@ def extrair_eventos_do_texto(texto: str) -> List[dict]:
 
         m_fim = _RE_FIM_LABEL.search(linha_s)
         if m_fim:
-            if not atual["fim"]:  # nao sobrescreve fim ja extraido inline
+            if not atual["fim"]:
                 atual["fim"] = m_fim.group(1).strip()
             continue
 
-        # Acumula como observação (remove aspas e espaços duplos)
+        # Acumula como observação
         obs_linha = linha_s.replace('"', "").strip()
         if obs_linha:
             atual["observacoes"] = (atual["observacoes"] + " " + obs_linha).strip()
