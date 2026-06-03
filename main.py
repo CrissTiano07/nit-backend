@@ -7,6 +7,7 @@ Integracao: Firebase Realtime Database + Railway
 """
 
 from fastapi import FastAPI, Header, HTTPException, Depends, status
+from routes.config import router as config_router
 from processar_relatorio import router as relatorio_router
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
