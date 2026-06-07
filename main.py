@@ -14,6 +14,8 @@ from pydantic import BaseModel
 import os
 from datetime import datetime
 import logging
+from routes.export import router as export_router
+app.include_router(export_router) 
 
 # ── CONFIGURACAO DE LOGS ──
 logging.basicConfig(
