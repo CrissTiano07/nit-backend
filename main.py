@@ -15,6 +15,16 @@ from pydantic import BaseModel
 import os
 from datetime import datetime
 import logging
+import firebase_admin
+from firebase_admin import credentials
+import json
+
+# ── INICIALIZACAO FIREBASE ──
+if not firebase_admin._apps:
+    fb_creds = json.loads(os.getenv("FIREBASE_CREDENTIALS", "{}"))
+    fb_url = os.getenv("FIREBASE_DATABASE_URL", "")
+    cred = credentials.Certificate(fb_creds)
+    firebase_admin.initialize_app(cred, {"databaseURL": fb_url})
 
 
 # ── CONFIGURACAO DE LOGS ──
