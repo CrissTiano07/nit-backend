@@ -125,8 +125,13 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
         chave = mp.get(campo_planilha, "")
         return str(dados.get(chave, "")).strip() if chave else ""
 
-    data_inicio_raw = fb("data_inicio")
-    hora_inicio_raw = fb("hora_inicio")
+    # Campo "inicio" pode conter "DD/MM/AAAA HH:MM" — separar data e hora
+    inicio_raw = fb("data_inicio")  # mapeado para "inicio" no Firebase
+    if " " in inicio_raw:
+        data_inicio_raw, hora_inicio_raw = inicio_raw.split(" ", 1)
+    else:
+        data_inicio_raw = inicio_raw
+        hora_inicio_raw = fb("hora_inicio")
 
     # Tradução do campo pl → STATUS_ATUAL legível
     pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
