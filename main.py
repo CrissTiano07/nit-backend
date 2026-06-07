@@ -9,13 +9,13 @@ Integracao: Firebase Realtime Database + Railway
 from fastapi import FastAPI, Header, HTTPException, Depends, status
 from routes.config import router as config_router
 from processar_relatorio import router as relatorio_router
+from routes.export import router as export_router          # ← import depois de app? PODE ficar aqui
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 from datetime import datetime
 import logging
-from routes.export import router as export_router
-app.include_router(export_router) 
+
 
 # ── CONFIGURACAO DE LOGS ──
 logging.basicConfig(
@@ -29,7 +29,10 @@ app = FastAPI(
     description="Backend para gestao e despacho automatizado de ocorrencias de semaforos",
     version="12.0.0",
 )
+
+# ── ROTAS ── (DEPOIS do app ser criado)
 app.include_router(relatorio_router)
+app.include_router(export_router)
 
 # ── CONFIGURACAO CORS ──
 app.add_middleware(
@@ -39,7 +42,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ── VARIAVEIS DE AMBIENTE ──
 NIT_SECRET_KEY = os.getenv("NIT_SECRET_KEY", "default-dev-key")
 RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", False)
