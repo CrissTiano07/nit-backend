@@ -4,7 +4,7 @@
     "spreadsheet_id": "192OVycIIw7kCmo7F3E-bafF6GGSNAYkOT-vgNb_i8jc",
     "sheet_name": "BancoFalhas",
     "modelo": "linha_por_linha",
-    "ocorrencias_node": "/ocorrencias",
+    "ocorrencias_node": "/kanban",
     "cursor_node": "/meta/ultimaExportacao/cliente_b",
     "coluna_id_ocorrencia": "R",
     "colunas": {
@@ -28,20 +28,20 @@
       "id_ocorrencia": "R"
     },
     "mapeamento_firebase": {
-      "scn": "cod",
+      "scn": "codigo",
       "localizacao": "endereco",
-      "data_plantao": "data_inicio",
+      "data_plantao": "dataReferencia",
       "plantonista": "operador",
-      "status_falha": "status_falha",
-      "causa": "causa",
-      "data_inicio": "data_inicio",
-      "hora_inicio": "hora_inicio",
+      "status_falha": "problema",
+      "causa": "tipo",
+      "data_inicio": "inicio",
+      "hora_inicio": "inicio",
       "data_fim": "data_fim",
       "hora_fim": "hora_fim",
-      "status_atual": "pl",
+      "status_atual": "status",
       "operando_cruzamento": "equipe",
       "bairro": "bairro",
-      "observacoes": "observacao"
+      "observacoes": "observacoes"
     }
   }
 }
