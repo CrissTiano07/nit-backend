@@ -1,1 +1,47 @@
-
+{
+  "cliente_b": {
+    "nome": "CTA - Falhas Semáforos",
+    "spreadsheet_id": "192OVycIIw7kCmo7F3E-bafF6GGSNAYkOT-vgNb_i8jc",
+    "sheet_name": "BancoFalhas",
+    "modelo": "linha_por_linha",
+    "ocorrencias_node": "/ocorrencias",
+    "cursor_node": "/meta/ultimaExportacao/cliente_b",
+    "coluna_id_ocorrencia": "R",
+    "colunas": {
+      "scn": "A",
+      "localizacao": "B",
+      "data_plantao": "C",
+      "plantonista": "D",
+      "status_falha": "E",
+      "causa": "F",
+      "data_inicio": "G",
+      "hora_inicio": "H",
+      "data_hora_in": "I",
+      "data_fim": "J",
+      "hora_fim": "K",
+      "data_hora_fim": "L",
+      "status_atual": "M",
+      "operando_cruzamento": "N",
+      "tempo_atendimento": "O",
+      "bairro": "P",
+      "observacoes": "Q",
+      "id_ocorrencia": "R"
+    },
+    "mapeamento_firebase": {
+      "scn": "cod",
+      "localizacao": "endereco",
+      "data_plantao": "data_inicio",
+      "plantonista": "operador",
+      "status_falha": "status_falha",
+      "causa": "causa",
+      "data_inicio": "data_inicio",
+      "hora_inicio": "hora_inicio",
+      "data_fim": "data_fim",
+      "hora_fim": "hora_fim",
+      "status_atual": "pl",
+      "operando_cruzamento": "equipe",
+      "bairro": "bairro",
+      "observacoes": "observacao"
+    }
+  }
+}
