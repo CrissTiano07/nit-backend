@@ -16,9 +16,9 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Logging estruturado
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -26,9 +26,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("nit.sheets")
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Google Sheets – autenticação
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 _sheets_service = None
 
 def get_sheets_service():
@@ -50,9 +50,9 @@ def get_sheets_service():
     return _sheets_service
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Helpers de data/hora
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def _fmt_date(val: Optional[str]) -> str:
     """Normaliza datas para DD/MM/AAAA (aceita AAAA-MM-DD ou DD/MM/AAAA)."""
@@ -110,9 +110,9 @@ def _concat_data_hora(data: str, hora: str) -> str:
     return d or h
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Mapeamento Firebase → linha da planilha
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
     """
@@ -156,9 +156,9 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
     return row
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Retry exponencial
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def _retry(fn, max_tries=3, base_delay=2):
     """Executa fn com retry exponencial. Lança a última exceção se esgotar."""
@@ -175,9 +175,9 @@ def _retry(fn, max_tries=3, base_delay=2):
                 raise
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Cache em memória: coluna R por planilha
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Chave: (spreadsheet_id, sheet_name)
 # Valor: dict {id_ocorrencia: row_number_1based}
 # Poupa chamadas à API quando várias ocorrências são normalizadas no mesmo ciclo.
@@ -189,9 +189,9 @@ def _invalidar_cache_linha(spreadsheet_id: str, sheet_name: str):
     _cache_coluna_r.pop((spreadsheet_id, sheet_name), None)
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Localizar linha pelo ID_OCORRENCIA (coluna R)
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def _encontrar_linha(service, spreadsheet_id: str, sheet_name: str, id_ocorrencia: str) -> Optional[int]:
     """
@@ -227,9 +227,9 @@ def _encontrar_linha(service, spreadsheet_id: str, sheet_name: str, id_ocorrenci
     return _cache_coluna_r[cache_key].get(str(id_ocorrencia))
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # API pública
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def append_nova_ocorrencia(
     cliente_config: dict,
@@ -374,9 +374,9 @@ def update_ocorrencia_normalizada(
         return False
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 # Cursor Firebase
-# ─────────────────────────────────────────────
+# ---------------------------------------------
 
 def get_cursor(cursor_node: str) -> dict:
     """
