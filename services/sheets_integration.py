@@ -135,6 +135,7 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
 
     # Tradução do campo pl → STATUS_ATUAL legível
     pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
+    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
     status_atual_raw = fb("status_atual")
     status_atual = pl_map.get(status_atual_raw, status_atual_raw.upper() if status_atual_raw else "")
 
@@ -152,7 +153,7 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
         "",                                                     # K – HORA_FIM
         "",                                                     # L – DATA_HORA_FIM
         status_atual or "AGUARDANDO",                           # M – STATUS_ATUAL
-        fb("operando_cruzamento"),                              # N – OPERANDO_CRUZAMENTO
+        sub_map.get(str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")),  # N – OPERANDO_CRUZAMENTO
         "",                                                     # O – TEMPO DE ATENDIMENTO
         fb("bairro"),                                           # P – BAIRRO
         fb("observacoes"),                                      # Q – OBSERVAÇÕES
@@ -274,7 +275,7 @@ def append_nova_ocorrencia(
             .append(
                 spreadsheetId=spreadsheet_id,
                 range=range_a1,
-                valueInputOption="USER_ENTERED",
+                valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row]},
             )
@@ -319,6 +320,7 @@ def update_ocorrencia_normalizada(
     hora_fim    = str(dados_fim.get("hora_fim",    "")).strip()
 
     pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
+    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
     pl_raw = str(dados_fim.get("pl", "")).strip()
     status_atual = pl_map.get(pl_raw, pl_raw.upper() if pl_raw else "NORMALIZADO")
 
