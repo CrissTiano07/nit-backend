@@ -170,8 +170,17 @@ def executar_exportacao(
             if ts_oc > nova_atualizacao:
                 nova_atualizacao = ts_oc
         else:
-            log.error("[%s] UPDATE falhou para id=%s – cursor NÃO avançado", cliente_id, id_oc)
-            break
+            # Linha não existe na planilha — faz APPEND como fallback
+            log.warning("[%s] UPDATE falhou id=%s – linha inexistente, tentando APPEND", cliente_id, id_oc)
+            ok_append = append_nova_ocorrencia(cliente_config, dados, id_oc, dry_run=dry_run)
+            if ok_append:
+                atualizados += 1
+                ts_oc = dados.get("ts_norm") or dados.get("ts", 0)
+                if ts_oc > nova_atualizacao:
+                    nova_atualizacao = ts_oc
+            else:
+                log.error("[%s] APPEND fallback falhou id=%s – cursor NÃO avançado", cliente_id, id_oc)
+                break
     else:
         if nova_atualizacao > ultima_atualizacao and not dry_run:
             update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
