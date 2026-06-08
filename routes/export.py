@@ -118,18 +118,18 @@ def executar_exportacao(
               .get()
     ) or {}
 
-    # Fallback: busca por campo "pl" == "norm" caso ts_norm não exista no Firebase
+    # Fallback: busca por status == "NORMALIZADO" caso ts_norm não exista no Firebase
     if not norm_query:
         log.warning(
-            "[%s] ts_norm não encontrado nas ocorrências – usando fallback por pl==norm + ts. "
+            "[%s] ts_norm não encontrado nas ocorrências – usando fallback por status==NORMALIZADO + ts. "
             "Considere gravar ts_norm no Firebase ao normalizar para evitar releitura completa.",
             cliente_id,
         )
         all_oc = ref_oc.get() or {}
         norm_query = {
             k: v for k, v in all_oc.items()
-            if isinstance(v, dict) and v.get("pl") == "norm"
-            and v.get("ts", 0) > ultima_atualizacao
+            if isinstance(v, dict) and v.get("status") == "NORMALIZADO"
+            and v.get("ts_norm", v.get("ts", 0)) > ultima_atualizacao
         }
 
     atualizados     = 0
@@ -138,7 +138,7 @@ def executar_exportacao(
     for id_oc, dados in norm_query.items():
         if not isinstance(dados, dict):
             continue
-        if dados.get("pl") != "norm":
+        if dados.get("status") != "NORMALIZADO":
             continue
 
         ok = update_ocorrencia_normalizada(cliente_config, id_oc, dados, dry_run=dry_run)
