@@ -96,6 +96,28 @@ def executar_exportacao(
     for id_oc, dados in novas_query.items():
         if not isinstance(dados, dict):
             continue
+
+        # Deduplicação: verifica se o eventoId já existe na coluna R
+        # Evita duplicatas quando ts é atualizado ao normalizar
+        if not dry_run:
+            from services.sheets_integration import get_sheets_service, _encontrar_linha
+            try:
+                svc = get_sheets_service()
+                linha_existente = _encontrar_linha(
+                    svc,
+                    cliente_config["spreadsheet_id"],
+                    cliente_config["sheet_name"],
+                    id_oc,
+                )
+                if linha_existente:
+                    log.info("SKIP | id=%s já existe na linha %d – ignorando append", id_oc, linha_existente)
+                    ts_oc = dados.get("ts", 0)
+                    if ts_oc > novo_ts:
+                        novo_ts = ts_oc
+                    continue
+            except Exception as exc:
+                log.warning("dedup check falhou para id=%s: %s – prosseguindo com append", id_oc, exc)
+
         ok = append_nova_ocorrencia(cliente_config, dados, id_oc, dry_run=dry_run)
         if ok:
             inseridos += 1
