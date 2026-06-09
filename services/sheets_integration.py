@@ -153,7 +153,7 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
         "",                                                     # K – HORA_FIM
         "",                                                     # L – DATA_HORA_FIM
         status_atual or "AGUARDANDO",                           # M – STATUS_ATUAL
-        sub_map.get(str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")),  # N – OPERANDO_CRUZAMENTO
+        sub_map.get(str(dados.get("sub", "")).strip().lower(), ""),  # N – OPERANDO_CRUZAMENTO
         "",                                                     # O – TEMPO DE ATENDIMENTO
         fb("bairro"),                                           # P – BAIRRO
         fb("observacoes"),                                      # Q – OBSERVAÇÕES
