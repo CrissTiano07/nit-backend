@@ -89,7 +89,7 @@ def executar_exportacao(
               .start_at(ultimo_ts + 1)
               .get()
     ) or {}
-
+    log.info(f"Query retornou {len(novas_query)} ocorrências novas")
     inseridos = 0
     novo_ts   = ultimo_ts
 
