@@ -39,7 +39,7 @@
       "data_fim": "data_fim",
       "hora_fim": "hora_fim",
       "status_atual": "status",
-      "operando_cruzamento": "equipe",
+      "operando_cruzamento": "sub",
       "bairro": "bairro",
       "observacoes": "observacoes"
     }
