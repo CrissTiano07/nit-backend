@@ -16,6 +16,7 @@ from firebase_admin import db as rtdb
 from services.sheets_integration import (
     append_nova_ocorrencia,
     update_ocorrencia_normalizada,
+    update_data_plantao,           # ← NOVA FUNÇÃO
     get_cursor,
     update_cursor,
 )
@@ -48,7 +49,6 @@ def _load_clientes_config() -> dict:
                 f"Cliente '{cliente_id}' no clientes.json está incompleto. "
                 f"Campos obrigatórios ausentes ou vazios: {faltando}"
             )
-        # spreadsheet_id com valor placeholder é tão ruim quanto ausente
         if cfg["spreadsheet_id"] == "SUBSTITUA_PELO_ID_DA_PLANILHA":
             raise ValueError(
                 f"Cliente '{cliente_id}': spreadsheet_id ainda é o valor placeholder. "
@@ -75,11 +75,12 @@ def executar_exportacao(
     ocorrencias_node = cliente_config.get("ocorrencias_node", "/ocorrencias")
 
     cursor = get_cursor(cursor_node)
-    ultimo_ts          = cursor["ultimo_ts"]
-    ultima_atualizacao = cursor["ultima_atualizacao"]
+    ultimo_ts               = cursor.get("ultimo_ts", 0)
+    ultima_atualizacao      = cursor.get("ultima_atualizacao", 0)
+    ultimo_dataReferencia   = cursor.get("ultimo_dataReferencia", 0)   # ← NOVO
 
-    log.info("[%s] iniciando exportação | ultimo_ts=%s | ultima_atualizacao=%s",
-             cliente_id, ultimo_ts, ultima_atualizacao)
+    log.info("[%s] iniciando exportação | ultimo_ts=%s | ultima_atualizacao=%s | ultimo_dataReferencia=%s",
+             cliente_id, ultimo_ts, ultima_atualizacao, ultimo_dataReferencia)
 
     ref_oc = rtdb.reference(ocorrencias_node)
 
@@ -97,8 +98,6 @@ def executar_exportacao(
         if not isinstance(dados, dict):
             continue
 
-        # Deduplicação: verifica se o eventoId já existe na coluna R
-        # Evita duplicatas quando ts é atualizado ao normalizar
         if not dry_run:
             from services.sheets_integration import get_sheets_service, _encontrar_linha
             try:
@@ -126,25 +125,22 @@ def executar_exportacao(
                 novo_ts = ts_oc
         else:
             log.error("[%s] APPEND falhou para id=%s – cursor NÃO avançado", cliente_id, id_oc)
-            # Interrompe para não pular registros
             break
     else:
-        # Só avança cursor se loop completou sem break
         if novo_ts > ultimo_ts and not dry_run:
             update_cursor(cursor_node, ultimo_ts=novo_ts)
 
-    # ── 2. Ocorrências normalizadas (pl == "norm", ts_norm > ultima_atualizacao) ──
+    # ── 2. Ocorrências normalizadas (ts_norm > ultima_atualizacao) ──────
     norm_query = (
         ref_oc.order_by_child("ts_norm")
               .start_at(ultima_atualizacao + 1)
               .get()
     ) or {}
 
-    # Fallback: busca por status == "NORMALIZADO" caso ts_norm não exista no Firebase
     if not norm_query:
         log.warning(
-            "[%s] ts_norm não encontrado nas ocorrências – usando fallback por status==NORMALIZADO + ts. "
-            "Considere gravar ts_norm no Firebase ao normalizar para evitar releitura completa.",
+            "[%s] ts_norm não encontrado – usando fallback por status==NORMALIZADO + ts. "
+            "Considere gravar ts_norm no Firebase.",
             cliente_id,
         )
         all_oc = ref_oc.get() or {}
@@ -170,7 +166,6 @@ def executar_exportacao(
             if ts_oc > nova_atualizacao:
                 nova_atualizacao = ts_oc
         else:
-            # Linha não existe na planilha — faz APPEND como fallback
             log.warning("[%s] UPDATE falhou id=%s – linha inexistente, tentando APPEND", cliente_id, id_oc)
             ok_append = append_nova_ocorrencia(cliente_config, dados, id_oc, dry_run=dry_run)
             if ok_append:
@@ -181,8 +176,41 @@ def executar_exportacao(
             else:
                 log.error("[%s] APPEND fallback falhou id=%s – cursor NÃO avançado", cliente_id, id_oc)
                 break
-    # ── 3. Despachos (sub != "" — cobre registros antigos e novos) ───────────
-    # Lê todas as ocorrências e filtra as que têm sub preenchido
+
+    if nova_atualizacao > ultima_atualizacao and not dry_run:
+        update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
+
+    # ── 3. Herança de dataReferencia (ts_dataReferencia > ultimo_dataReferencia) ──
+    dataRef_query = (
+        ref_oc.order_by_child("ts_dataReferencia")
+              .start_at(ultimo_dataReferencia + 1)
+              .get()
+    ) or {}
+
+    herdados = 0
+    novo_dataReferencia = ultimo_dataReferencia
+
+    for id_oc, dados in dataRef_query.items():
+        if not isinstance(dados, dict):
+            continue
+        nova_data = dados.get("dataReferencia", "")
+        if not nova_data:
+            continue
+
+        ok = update_data_plantao(cliente_config, id_oc, nova_data, dry_run=dry_run)
+        if ok:
+            herdados += 1
+            ts_oc = dados.get("ts_dataReferencia", 0)
+            if ts_oc > novo_dataReferencia:
+                novo_dataReferencia = ts_oc
+        else:
+            log.error("[%s] DATA_REFERENCIA falhou para id=%s – cursor NÃO avançado", cliente_id, id_oc)
+            break
+    else:
+        if novo_dataReferencia > ultimo_dataReferencia and not dry_run:
+            update_cursor(cursor_node, ultimo_dataReferencia=novo_dataReferencia)
+
+    # ── 4. Despachos (sub != "") ────────────────────────────────────────
     all_oc_despacho = ref_oc.get() or {}
     despacho_query = {
         k: v for k, v in all_oc_despacho.items()
@@ -213,7 +241,6 @@ def executar_exportacao(
                 )
                 if row_num:
                     sheet_name = cliente_config["sheet_name"]
-                    # Verifica se coluna N já tem o valor correto
                     atual = svc.spreadsheets().values().get(
                         spreadsheetId=cliente_config["spreadsheet_id"],
                         range=f"'{sheet_name}'!N{row_num}",
@@ -237,13 +264,11 @@ def executar_exportacao(
             log.info("DRY_RUN DESPACHO | id=%s | coluna_n=%s", id_oc, valor_n)
             despachados += 1
 
-    if nova_atualizacao > ultima_atualizacao and not dry_run:
-        update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
-
     resultado = {
         "cliente": cliente_id,
         "inseridos": inseridos,
         "atualizados": atualizados,
+        "herdados": herdados,
         "despachados": despachados,
         "dry_run": dry_run,
     }
@@ -261,24 +286,12 @@ async def exportar(
     cliente: Optional[str] = Query(None, description="ID do cliente (ex: cliente_b). Omitir = todos."),
     dry_run: bool = Query(False, description="Se true, não escreve na planilha"),
 ):
-    """
-    Dispara exportação manual NIT → Google Sheets.
-
-    Headers:
-        X-NIT-KEY: chave de autenticação (var EXPORT_SECRET no Railway)
-
-    Query params:
-        cliente: ID do cliente (opcional; omitir exporta todos)
-        dry_run: true para simular sem escrever
-    """
-    # ── Auth ──────────────────────────────────
     expected_key = os.environ.get("EXPORT_SECRET", "")
     if not expected_key:
         raise HTTPException(500, "EXPORT_SECRET não configurado no servidor.")
     if x_nit_key != expected_key:
         raise HTTPException(401, "X-NIT-KEY inválida ou ausente.")
 
-    # ── Config ────────────────────────────────
     try:
         clientes = _load_clientes_config()
     except FileNotFoundError:
@@ -292,7 +305,6 @@ async def exportar(
     else:
         targets = clientes
 
-    # ── Execução ──────────────────────────────
     resultados = []
     for cid, cfg in targets.items():
         try:
