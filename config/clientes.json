@@ -6,7 +6,7 @@
     "modelo": "linha_por_linha",
     "ocorrencias_node": "/kanban",
     "cursor_node": "/meta/ultimaExportacao/cliente_b",
-    "cursor_campos": ["ultimo_ts", "ultima_atualizacao", "ultimo_dataReferencia"]
+    "cursor_campos": ["ultimo_ts", "ultima_atualizacao", "ultimo_dataReferencia"],
     "coluna_id_ocorrencia": "R",
     "colunas": {
       "scn": "A",
