@@ -89,7 +89,7 @@ def executar_exportacao(
               .start_at(ultimo_ts + 1)
               .get()
     ) or {}
-    log.info(f"Query retornou {len(novas_query)} ocorrências novas")
+
     inseridos = 0
     novo_ts   = ultimo_ts
 
@@ -181,14 +181,63 @@ def executar_exportacao(
             else:
                 log.error("[%s] APPEND fallback falhou id=%s – cursor NÃO avançado", cliente_id, id_oc)
                 break
-    else:
-        if nova_atualizacao > ultima_atualizacao and not dry_run:
-            update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
+    # ── 3. Despachos (ts_despacho > ultima_atualizacao) ──────────────────────
+    despacho_query = (
+        ref_oc.order_by_child("ts_despacho")
+              .start_at(ultima_atualizacao + 1)
+              .get()
+    ) or {}
+
+    despachados = 0
+    from services.sheets_integration import get_sheets_service, _encontrar_linha
+
+    for id_oc, dados in despacho_query.items():
+        if not isinstance(dados, dict):
+            continue
+        sub = str(dados.get("sub", "")).strip().lower()
+        if not sub:
+            continue
+
+        sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
+        valor_n = sub_map.get(sub, sub.upper())
+
+        if not dry_run:
+            try:
+                svc = get_sheets_service()
+                row_num = _encontrar_linha(
+                    svc,
+                    cliente_config["spreadsheet_id"],
+                    cliente_config["sheet_name"],
+                    id_oc,
+                )
+                if row_num:
+                    sheet_name = cliente_config["sheet_name"]
+                    svc.spreadsheets().values().batchUpdate(
+                        spreadsheetId=cliente_config["spreadsheet_id"],
+                        body={
+                            "valueInputOption": "RAW",
+                            "data": [{"range": f"'{sheet_name}'!N{row_num}", "values": [[valor_n]]}],
+                        },
+                    ).execute()
+                    log.info("DESPACHO OK | id=%s | coluna_n=%s | row=%d", id_oc, valor_n, row_num)
+                    despachados += 1
+                    ts_d = dados.get("ts_despacho", 0)
+                    if ts_d > nova_atualizacao:
+                        nova_atualizacao = ts_d
+            except Exception as exc:
+                log.error("DESPACHO FAIL | id=%s | erro=%s", id_oc, exc)
+        else:
+            log.info("DRY_RUN DESPACHO | id=%s | coluna_n=%s", id_oc, valor_n)
+            despachados += 1
+
+    if nova_atualizacao > ultima_atualizacao and not dry_run:
+        update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
 
     resultado = {
         "cliente": cliente_id,
         "inseridos": inseridos,
         "atualizados": atualizados,
+        "despachados": despachados,
         "dry_run": dry_run,
     }
     log.info("[%s] exportação concluída | %s", cliente_id, resultado)
