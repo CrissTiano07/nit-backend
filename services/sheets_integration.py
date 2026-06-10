@@ -380,7 +380,52 @@ def update_ocorrencia_normalizada(
         log.error("UPDATE FAIL | id=%s | erro=%s", id_ocorrencia, exc)
         return False
 
+    def update_data_plantao(
+    cliente_config: dict,
+    id_ocorrencia: str,
+    nova_data: str,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Atualiza apenas a coluna C (DATA_PLANTAO) na planilha.
+    Usado para herança de pendências entre dias.
+    """
+    spreadsheet_id = cliente_config["spreadsheet_id"]
+    sheet_name     = cliente_config["sheet_name"]
 
+    log.info("DATA_REF | id=%s | nova_data=%s | dry_run=%s", id_ocorrencia, nova_data, dry_run)
+
+    if dry_run:
+        return True
+
+    service = get_sheets_service()
+    row_num = _encontrar_linha(service, spreadsheet_id, sheet_name, id_ocorrencia)
+    if row_num is None:
+        log.warning("DATA_REF | linha não encontrada para id=%s", id_ocorrencia)
+        return False
+
+    range_c = f"'{sheet_name}'!C{row_num}"
+
+    def _write():
+        return (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=spreadsheet_id,
+                range=range_c,
+                valueInputOption="RAW",
+                body={"values": [[nova_data]]},
+            )
+            .execute()
+        )
+
+    try:
+        result = _retry(_write)
+        log.info("DATA_REF OK | id=%s | row=%d | nova_data=%s", id_ocorrencia, row_num, nova_data)
+        return True
+    except Exception as exc:
+        log.error("DATA_REF FAIL | id=%s | erro=%s", id_ocorrencia, exc)
+        return False
 # ---------------------------------------------
 # Cursor Firebase
 # ---------------------------------------------
