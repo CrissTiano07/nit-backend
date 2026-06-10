@@ -181,12 +181,13 @@ def executar_exportacao(
             else:
                 log.error("[%s] APPEND fallback falhou id=%s – cursor NÃO avançado", cliente_id, id_oc)
                 break
-    # ── 3. Despachos (ts_despacho > ultima_atualizacao) ──────────────────────
-    despacho_query = (
-        ref_oc.order_by_child("ts_despacho")
-              .start_at(ultima_atualizacao + 1)
-              .get()
-    ) or {}
+    # ── 3. Despachos (sub != "" — cobre registros antigos e novos) ───────────
+    # Lê todas as ocorrências e filtra as que têm sub preenchido
+    all_oc_despacho = ref_oc.get() or {}
+    despacho_query = {
+        k: v for k, v in all_oc_despacho.items()
+        if isinstance(v, dict) and str(v.get("sub", "")).strip().lower() in ("vl", "amc")
+    }
 
     despachados = 0
     from services.sheets_integration import get_sheets_service, _encontrar_linha
@@ -212,6 +213,15 @@ def executar_exportacao(
                 )
                 if row_num:
                     sheet_name = cliente_config["sheet_name"]
+                    # Verifica se coluna N já tem o valor correto
+                    atual = svc.spreadsheets().values().get(
+                        spreadsheetId=cliente_config["spreadsheet_id"],
+                        range=f"'{sheet_name}'!N{row_num}",
+                    ).execute()
+                    valor_atual = (atual.get("values") or [[""]])[0][0] if atual.get("values") else ""
+                    if valor_atual == valor_n:
+                        log.debug("DESPACHO SKIP | id=%s | coluna_n já=%s", id_oc, valor_n)
+                        continue
                     svc.spreadsheets().values().batchUpdate(
                         spreadsheetId=cliente_config["spreadsheet_id"],
                         body={
@@ -221,9 +231,6 @@ def executar_exportacao(
                     ).execute()
                     log.info("DESPACHO OK | id=%s | coluna_n=%s | row=%d", id_oc, valor_n, row_num)
                     despachados += 1
-                    ts_d = dados.get("ts_despacho", 0)
-                    if ts_d > nova_atualizacao:
-                        nova_atualizacao = ts_d
             except Exception as exc:
                 log.error("DESPACHO FAIL | id=%s | erro=%s", id_oc, exc)
         else:
