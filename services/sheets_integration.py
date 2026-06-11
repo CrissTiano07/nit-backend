@@ -401,6 +401,102 @@ def update_data_plantao(
         log.error("DATA_REF FAIL | id=%s | erro=%s", id_ocorrencia, exc)
         return False
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Substitui a lógica de "sobrescrever coluna C" por "inserir nova linha"
+# ─────────────────────────────────────────────────────────────────────────────
+
+def append_heranca_diaria(
+    cliente_config: dict,
+    dados_ocorrencia: dict,
+    id_ocorrencia: str,
+    data_plantao: str,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Insere uma nova linha para ocorrência pendente herdada entre dias.
+
+    Regras:
+      - Coluna R (ID_OCORRENCIA) → mesmo id_ocorrencia original
+      - Coluna G (DATA_INICIO)   → data do primeiro dia (vem do Firebase via dados_ocorrencia)
+      - Coluna C (DATA_PLANTAO)  → data_plantao (data do plantão atual, passada explicitamente)
+      - Colunas J/K/L/M/O        → vazias (ainda pendente)
+
+    Deduplicação: se já existe uma linha com esse id_ocorrencia E essa data_plantao
+    na coluna C, a inserção é ignorada (evita duplicatas em re-execuções).
+    """
+    spreadsheet_id = cliente_config["spreadsheet_id"]
+    sheet_name     = cliente_config["sheet_name"]
+
+    # Monta a linha com os dados originais do Firebase
+    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
+
+    # Sobrescreve coluna C com a data do plantão atual (índice 2)
+    row[2] = _fmt_date(data_plantao)
+
+    log.info(
+        "HERANÇA APPEND | id=%s | data_plantao=%s | data_inicio=%s | dry_run=%s",
+        id_ocorrencia, row[2], row[6], dry_run,
+    )
+
+    if dry_run:
+        log.info("DRY_RUN HERANÇA – linha: %s", row)
+        return True
+
+    service = get_sheets_service()
+
+    # ── Deduplicação: evita inserir a mesma data_plantao duas vezes ──────────
+    # Lê colunas C e R para checar par (id_ocorrencia, data_plantao)
+    try:
+        result_cr = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{sheet_name}'!C:R",
+        ).execute()
+        valores_cr = result_cr.get("values", [])
+        col_c_idx = 0          # C é a 1ª coluna do range C:R
+        col_r_idx = 15         # R é a 16ª coluna do range C:R (R - C = 15)
+        data_plantao_fmt = _fmt_date(data_plantao)
+        for linha_vals in valores_cr:
+            c_val = linha_vals[col_c_idx] if len(linha_vals) > col_c_idx else ""
+            r_val = linha_vals[col_r_idx] if len(linha_vals) > col_r_idx else ""
+            if r_val == id_ocorrencia and c_val == data_plantao_fmt:
+                log.info(
+                    "HERANÇA SKIP (já existe) | id=%s | data_plantao=%s",
+                    id_ocorrencia, data_plantao_fmt,
+                )
+                return True   # Considera sucesso — não é falha, só duplicata
+    except Exception as exc:
+        log.warning("HERANÇA dedup check falhou | id=%s | erro=%s – prosseguindo", id_ocorrencia, exc)
+
+    # ── Append ───────────────────────────────────────────────────────────────
+    range_a1 = f"'{sheet_name}'!A:R"
+
+    def _write():
+        return (
+            service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=spreadsheet_id,
+                range=range_a1,
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [row]},
+            )
+            .execute()
+        )
+
+    try:
+        result = _retry(_write)
+        log.info(
+            "HERANÇA APPEND OK | id=%s | data_plantao=%s | updatedRows=%s",
+            id_ocorrencia, row[2], result.get("updates", {}).get("updatedRows"),
+        )
+        _invalidar_cache_linha(spreadsheet_id, sheet_name)
+        return True
+    except Exception as exc:
+        log.error("HERANÇA APPEND FAIL | id=%s | erro=%s", id_ocorrencia, exc)
+        return False
+
+
 
 # ---------------------------------------------
 # Cursor Firebase
