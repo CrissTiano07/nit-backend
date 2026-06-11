@@ -16,7 +16,7 @@ from firebase_admin import db as rtdb
 from services.sheets_integration import (
     append_nova_ocorrencia,
     update_ocorrencia_normalizada,
-    update_data_plantao,           # ← NOVA FUNÇÃO
+    append_heranca_diaria,           
     get_cursor,
     update_cursor,
 )
@@ -180,36 +180,60 @@ def executar_exportacao(
     if nova_atualizacao > ultima_atualizacao and not dry_run:
         update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
 
-    # ── 3. Herança de dataReferencia (ts_dataReferencia > ultimo_dataReferencia) ──
+     # ── 3. Herança de dataReferencia → nova linha por dia de pendência ─────
+    #
+    # Estratégia Opção 1: cada dia que uma ocorrência permanece pendente
+    # gera uma NOVA LINHA na planilha com:
+    #   - Coluna C (DATA_PLANTAO) = data do plantão atual
+    #   - Coluna G (DATA_INICIO)  = data original (inalterada)
+    #   - Coluna R (ID_OCORRENCIA)= mesmo id original
+    #
     dataRef_query = (
         ref_oc.order_by_child("ts_dataReferencia")
               .start_at(ultimo_dataReferencia + 1)
               .get()
     ) or {}
-
+ 
     herdados = 0
     novo_dataReferencia = ultimo_dataReferencia
-
+ 
     for id_oc, dados in dataRef_query.items():
         if not isinstance(dados, dict):
             continue
+ 
+        # Só processa pendentes — normalizados não herdam
+        if dados.get("status") == "NORMALIZADO":
+            log.debug("HERANÇA SKIP normalizado | id=%s", id_oc)
+            ts_oc = dados.get("ts_dataReferencia", 0)
+            if ts_oc > novo_dataReferencia:
+                novo_dataReferencia = ts_oc
+            continue
+ 
         nova_data = dados.get("dataReferencia", "")
         if not nova_data:
             continue
-
-        ok = update_data_plantao(cliente_config, id_oc, nova_data, dry_run=dry_run)
+ 
+        ok = append_heranca_diaria(
+            cliente_config,
+            dados,
+            id_oc,
+            data_plantao=nova_data,
+            dry_run=dry_run,
+        )
         if ok:
             herdados += 1
             ts_oc = dados.get("ts_dataReferencia", 0)
             if ts_oc > novo_dataReferencia:
                 novo_dataReferencia = ts_oc
         else:
-            log.error("[%s] DATA_REFERENCIA falhou para id=%s – cursor NÃO avançado", cliente_id, id_oc)
+            log.error(
+                "[%s] HERANÇA APPEND falhou para id=%s – cursor NÃO avançado",
+                cliente_id, id_oc,
+            )
             break
     else:
         if novo_dataReferencia > ultimo_dataReferencia and not dry_run:
             update_cursor(cursor_node, ultimo_dataReferencia=novo_dataReferencia)
-
     # ── 4. Despachos (sub != "") ────────────────────────────────────────
     all_oc_despacho = ref_oc.get() or {}
     despacho_query = {
