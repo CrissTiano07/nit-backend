@@ -311,6 +311,65 @@ def append_nova_ocorrencia(
         return False
 
 
+def append_heranca_diaria(
+    cliente_config: dict,
+    dados_ocorrencia: dict,
+    id_ocorrencia: str,
+    data_plantao: str,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Insere nova linha para ocorrência pendente que persiste em novo dia de plantão.
+    Coluna C (DATA_PLANTAO) = data_plantao (data atual do plantão)
+    Coluna G (DATA_INICIO)  = data original da ocorrência (inalterada)
+    Coluna R (ID_OCORRENCIA)= mesmo id original (rastreabilidade)
+    """
+    spreadsheet_id = cliente_config["spreadsheet_id"]
+    sheet_name     = cliente_config["sheet_name"]
+
+    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
+
+    # Sobrescreve coluna C (índice 2) com a data do plantão atual
+    row[2] = _fmt_date(data_plantao)
+
+    inicio_raw   = str(dados_ocorrencia.get("inicio", "")).strip()
+    data_inicio_log = inicio_raw.split(" ")[0] if " " in inicio_raw else inicio_raw
+
+    log.info("HERANÇA APPEND | id=%s | data_plantao=%s | data_inicio=%s | dry_run=%s",
+             id_ocorrencia, data_plantao, data_inicio_log, dry_run)
+
+    if dry_run:
+        log.info("DRY_RUN HERANÇA – linha que seria inserida: %s", row)
+        return True
+
+    service  = get_sheets_service()
+    range_a1 = f"'{sheet_name}'!A:R"
+
+    def _write():
+        return (
+            service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=spreadsheet_id,
+                range=range_a1,
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [row]},
+            )
+            .execute()
+        )
+
+    try:
+        result = _retry(_write)
+        log.info("HERANÇA APPEND OK | id=%s | updatedRows=%s",
+                 id_ocorrencia, result.get("updates", {}).get("updatedRows"))
+        _invalidar_cache_linha(spreadsheet_id, sheet_name)
+        return True
+    except Exception as exc:
+        log.error("HERANÇA APPEND FAIL | id=%s | erro=%s", id_ocorrencia, exc)
+        return False
+
+
 def update_ocorrencia_normalizada(
     cliente_config: dict,
     id_ocorrencia: str,
