@@ -40,7 +40,7 @@ def _load_clientes_config() -> dict:
         faltando = [c for c in _CAMPOS_OBRIGATORIOS if not cfg.get(c)]
         if faltando:
             raise ValueError(f"Cliente '{cliente_id}' incompleto. Ausentes: {faltando}")
-        if cfg["spreadsheet_id"] == "192OVycIIw7kCmo7F3E-bafF6GGSNAYkOT-vgNb_i8jc":
+        if cfg["spreadsheet_id"] == "nitsheetapi-498702":
             raise ValueError(f"Cliente '{cliente_id}': spreadsheet_id é placeholder.")
     return clientes
 
