@@ -7,7 +7,7 @@ import os
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 
 import firebase_admin
@@ -65,14 +65,14 @@ def _fmt_date(val: Optional[str]) -> str:
             return d.strftime("%d/%m/%Y")
         except ValueError:
             pass
-    return val
+    return val  # já está no formato correto ou livre
 
 
 def _fmt_time(val: Optional[str]) -> str:
     """Retorna hora no formato HH:MM."""
     if not val:
         return ""
-    return str(val).strip()[:5]
+    return str(val).strip()[:5]  # trunca segundos se existirem
 
 
 def calcular_tempo_atendimento(
@@ -83,27 +83,30 @@ def calcular_tempo_atendimento(
 ) -> str:
     """
     Calcula duração entre início e fim.
+    Aceita datas em DD/MM/YYYY ou YYYY-MM-DD.
     Retorna string HH:MM:SS ou '' em caso de dados incompletos.
     """
-    # Verifica se os dados de fim existem
-    if not data_fim or not hora_fim or data_fim.strip() == "" or hora_fim.strip() == "":
-        return ""
-    
+    def _normalizar_data(data: str) -> str:
+        """Converte DD/MM/YYYY → YYYY-MM-DD para compatibilidade com strptime."""
+        data = str(data).strip()[:10]
+        if "/" in data:
+            partes = data.split("/")
+            if len(partes) == 3:
+                return f"{partes[2]}-{partes[1]}-{partes[0]}"
+        return data  # já está em YYYY-MM-DD ou formato livre
+
     try:
-        # Tenta converter DD/MM/AAAA ou AAAA-MM-DD
-        data_inicio_clean = data_inicio.strip()
-        data_fim_clean = data_fim.strip()
-        
-        if "/" in data_inicio_clean:
-            dia, mes, ano = data_inicio_clean.split("/")
-            data_inicio_clean = f"{ano}-{mes}-{dia}"
-        if "/" in data_fim_clean:
-            dia, mes, ano = data_fim_clean.split("/")
-            data_fim_clean = f"{ano}-{mes}-{dia}"
-        
-        dt_in = datetime.strptime(f"{data_inicio_clean} {hora_inicio[:5]}", "%Y-%m-%d %H:%M")
-        dt_fim = datetime.strptime(f"{data_fim_clean} {hora_fim[:5]}", "%Y-%m-%d %H:%M")
-        delta = dt_fim - dt_in
+        d_ini = _normalizar_data(data_inicio)
+        d_fim = _normalizar_data(data_fim)
+        h_ini = str(hora_inicio).strip()[:5]
+        h_fim = str(hora_fim).strip()[:5]
+
+        if not d_ini or not d_fim or not h_ini or not h_fim:
+            return ""
+
+        dt_in  = datetime.strptime(f"{d_ini} {h_ini}", "%Y-%m-%d %H:%M")
+        dt_fim = datetime.strptime(f"{d_fim} {h_fim}", "%Y-%m-%d %H:%M")
+        delta  = dt_fim - dt_in
         if delta.total_seconds() < 0:
             return ""
         total_sec = int(delta.total_seconds())
@@ -141,40 +144,38 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
         return str(dados.get(chave, "")).strip() if chave else ""
 
     # Campo "inicio" pode conter "DD/MM/AAAA HH:MM" — separar data e hora
-    inicio_raw = fb("data_inicio")
+    inicio_raw = fb("data_inicio")  # mapeado para "inicio" no Firebase
     if " " in inicio_raw:
         data_inicio_raw, hora_inicio_raw = inicio_raw.split(" ", 1)
     else:
         data_inicio_raw = inicio_raw
         hora_inicio_raw = fb("hora_inicio")
 
-    # Tradução do campo status → STATUS_ATUAL legível
-    status_map = {"NORMALIZADO": "NORMALIZADO", "PENDENTE": "AGUARDANDO"}
-    status_atual_raw = fb("status_atual")
-    status_atual = status_map.get(status_atual_raw, status_atual_raw.upper() if status_atual_raw else "AGUARDANDO")
-
+    # Tradução do campo pl → STATUS_ATUAL legível
+    pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
     sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
-    sub_val = str(dados.get("sub", "")).strip().lower()
+    status_atual_raw = fb("status_atual")
+    status_atual = pl_map.get(status_atual_raw, status_atual_raw.upper() if status_atual_raw else "")
 
     row = [
-        fb("scn"),                                                                  # A
-        fb("localizacao"),                                                          # B
-        _fmt_date(data_inicio_raw),                                                 # C – DATA_PLANTAO
-        fb("plantonista"),                                                          # D
-        fb("status_falha").upper() if fb("status_falha") else "",                    # E
-        fb("causa").upper() if fb("causa") else "",                                  # F
-        _fmt_date(data_inicio_raw),                                                 # G – DATA_INICIO
-        _fmt_time(hora_inicio_raw),                                                 # H – HORA_INICIO
-        _concat_data_hora(data_inicio_raw, hora_inicio_raw),                        # I – DATA_HORA_IN
-        "",                                                                         # J – DATA_FIM
-        "",                                                                         # K – HORA_FIM
-        "",                                                                         # L – DATA_HORA_FIM
-        status_atual,                                                               # M – STATUS_ATUAL
-        sub_map.get(sub_val, ""),                                                   # N – OPERANDO_CRUZAMENTO
-        "",                                                                         # O – TEMPO ATENDIMENTO
-        fb("bairro"),                                                               # P
-        fb("observacoes"),                                                          # Q
-        id_ocorrencia,                                                              # R – ID_OCORRENCIA
+        fb("scn"),                                              # A – SCN
+        fb("localizacao"),                                      # B – LOCALIZAÇÃO
+        _fmt_date(data_inicio_raw),                             # C – DATA_PLANTAO (usa data_inicio)
+        fb("plantonista"),                                      # D – PLANTONISTA
+        fb("status_falha").upper() if fb("status_falha") else "",  # E – STATUS_FALHA
+        fb("causa").upper() if fb("causa") else "",             # F – CAUSA
+        _fmt_date(data_inicio_raw),                             # G – DATA_INICIO
+        _fmt_time(hora_inicio_raw),                             # H – HORA_INICIO
+        _concat_data_hora(data_inicio_raw, hora_inicio_raw),    # I – DATA_HORA_IN
+        "",                                                     # J – DATA_FIM (vazio na criação)
+        "",                                                     # K – HORA_FIM
+        "",                                                     # L – DATA_HORA_FIM
+        status_atual or "AGUARDANDO",                           # M – STATUS_ATUAL
+        sub_map.get(str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")),  # N – OPERANDO_CRUZAMENTO
+        "",                                                     # O – TEMPO DE ATENDIMENTO
+        fb("bairro"),                                           # P – BAIRRO
+        fb("observacoes"),                                      # Q – OBSERVAÇÕES
+        id_ocorrencia,                                          # R – ID_OCORRENCIA (oculta)
     ]
     return row
 
@@ -201,6 +202,10 @@ def _retry(fn, max_tries=3, base_delay=2):
 # ---------------------------------------------
 # Cache em memória: coluna R por planilha
 # ---------------------------------------------
+# Chave: (spreadsheet_id, sheet_name)
+# Valor: dict {id_ocorrencia: row_number_1based}
+# Poupa chamadas à API quando várias ocorrências são normalizadas no mesmo ciclo.
+# Invalidar com _invalidar_cache_linha() sempre que o append inserir uma nova linha.
 _cache_coluna_r: dict = {}
 
 def _invalidar_cache_linha(spreadsheet_id: str, sheet_name: str):
@@ -208,8 +213,18 @@ def _invalidar_cache_linha(spreadsheet_id: str, sheet_name: str):
     _cache_coluna_r.pop((spreadsheet_id, sheet_name), None)
 
 
+# ---------------------------------------------
+# Localizar linha pelo ID_OCORRENCIA (coluna R)
+# ---------------------------------------------
+
 def _encontrar_linha(service, spreadsheet_id: str, sheet_name: str, id_ocorrencia: str) -> Optional[int]:
-    """Localiza linha pelo ID_OCORRENCIA na coluna R (usando cache)."""
+    """
+    Percorre a coluna R para encontrar o índice (1-based) da linha com o ID.
+    Usa cache em memória dentro do mesmo ciclo de exportação: a coluna R é lida
+    apenas uma vez por planilha, independente de quantas ocorrências precisem
+    ser localizadas (eficiente para planilhas com milhares de linhas).
+    Retorna None se não encontrar.
+    """
     cache_key = (spreadsheet_id, sheet_name)
 
     if cache_key not in _cache_coluna_r:
@@ -237,7 +252,7 @@ def _encontrar_linha(service, spreadsheet_id: str, sheet_name: str, id_ocorrenci
 
 
 # ---------------------------------------------
-# API pública – APPEND
+# API pública
 # ---------------------------------------------
 
 def append_nova_ocorrencia(
@@ -246,15 +261,26 @@ def append_nova_ocorrencia(
     id_ocorrencia: str,
     dry_run: bool = False,
 ) -> bool:
-    """Adiciona uma nova linha ao final da planilha."""
+    """
+    Adiciona uma nova linha ao final da planilha.
+
+    Args:
+        cliente_config: bloco do clientes.json para o cliente
+        dados_ocorrencia: dict vindo do Firebase
+        id_ocorrencia: chave do nó no Firebase (usada como ID único na coluna R)
+        dry_run: se True, apenas loga sem escrever
+
+    Returns:
+        True em sucesso, False em falha
+    """
     spreadsheet_id = cliente_config["spreadsheet_id"]
-    sheet_name = cliente_config["sheet_name"]
-    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
+    sheet_name     = cliente_config["sheet_name"]
+    row            = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
 
     log.info("APPEND | id=%s | scn=%s | dry_run=%s", id_ocorrencia, row[0], dry_run)
 
     if dry_run:
-        log.info("DRY_RUN – linha: %s", row)
+        log.info("DRY_RUN – linha que seria inserida: %s", row)
         return True
 
     service = get_sheets_service()
@@ -277,6 +303,7 @@ def append_nova_ocorrencia(
     try:
         result = _retry(_write)
         log.info("APPEND OK | updates=%s", result.get("updates", {}).get("updatedRows"))
+        # Invalida cache da coluna R: a nova linha mudou o índice potencial de buscas futuras
         _invalidar_cache_linha(spreadsheet_id, sheet_name)
         return True
     except Exception as exc:
@@ -284,27 +311,43 @@ def append_nova_ocorrencia(
         return False
 
 
-# ---------------------------------------------
-# API pública – UPDATE (normalização)
-# ---------------------------------------------
-
 def update_ocorrencia_normalizada(
     cliente_config: dict,
     id_ocorrencia: str,
     dados_fim: dict,
     dry_run: bool = False,
 ) -> bool:
-    """Atualiza colunas de finalização (J, K, L, M, O)."""
+    """
+    Atualiza as colunas de finalização de uma ocorrência já existente na planilha.
+
+    Args:
+        cliente_config: bloco do clientes.json
+        id_ocorrencia: ID Firebase para localizar a linha
+        dados_fim: dict com data_fim, hora_fim, data_inicio, hora_inicio, equipe, pl, etc.
+        dry_run: se True, não escreve
+
+    Returns:
+        True em sucesso, False em falha
+    """
     spreadsheet_id = cliente_config["spreadsheet_id"]
-    sheet_name = cliente_config["sheet_name"]
+    sheet_name     = cliente_config["sheet_name"]
 
-    data_inicio = str(dados_fim.get("data_inicio", "")).strip()
-    hora_inicio = str(dados_fim.get("hora_inicio", "")).strip()
-    data_fim = str(dados_fim.get("data_fim", "")).strip()
-    hora_fim = str(dados_fim.get("hora_fim", "")).strip()
+    # Firebase guarda início como campo combinado "DD/MM/YYYY HH:MM" (campo 'inicio').
+    # Separar data e hora para calcular o tempo de atendimento.
+    inicio_raw  = str(dados_fim.get("inicio", "")).strip()
+    if " " in inicio_raw:
+        data_inicio, hora_inicio = inicio_raw.split(" ", 1)
+    else:
+        data_inicio = inicio_raw
+        hora_inicio = ""
 
-    status_raw = dados_fim.get("status", "")
-    status_atual = "NORMALIZADO" if status_raw == "NORMALIZADO" else "AGUARDANDO"
+    data_fim    = str(dados_fim.get("data_fim",    "")).strip()
+    hora_fim    = str(dados_fim.get("hora_fim",    "")).strip()
+
+    pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
+    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
+    pl_raw = str(dados_fim.get("pl", "")).strip()
+    status_atual = pl_map.get(pl_raw, pl_raw.upper() if pl_raw else "NORMALIZADO")
 
     tempo = calcular_tempo_atendimento(data_inicio, hora_inicio, data_fim, hora_fim)
 
@@ -312,25 +355,54 @@ def update_ocorrencia_normalizada(
              id_ocorrencia, data_fim, hora_fim, tempo, dry_run)
 
     if dry_run:
+        log.info("DRY_RUN – dados que seriam atualizados: data_fim=%s, hora_fim=%s, tempo=%s, status=%s",
+                 data_fim, hora_fim, tempo, status_atual)
         return True
 
     service = get_sheets_service()
+
     row_num = _encontrar_linha(service, spreadsheet_id, sheet_name, id_ocorrencia)
     if row_num is None:
-        log.warning("UPDATE | linha não encontrada para id=%s", id_ocorrencia)
+        log.error("UPDATE FAIL | id=%s | linha não encontrada na planilha", id_ocorrencia)
         return False
 
+    # ── Colunas J, K, L, M — sempre atualizadas na normalização ──────────
     updates = [
         (f"'{sheet_name}'!J{row_num}", _fmt_date(data_fim)),
         (f"'{sheet_name}'!K{row_num}", _fmt_time(hora_fim)),
         (f"'{sheet_name}'!L{row_num}", _concat_data_hora(data_fim, hora_fim)),
         (f"'{sheet_name}'!M{row_num}", status_atual),
-        (f"'{sheet_name}'!O{row_num}", tempo),
     ]
+
+    # ── Coluna O (Tempo de Atendimento) — write-once ──────────────────────
+    # Só grava se: (1) o cálculo retornou valor e (2) a célula está vazia.
+    # Evita sobrescrever um tempo correto caso o cron rode duas vezes
+    # ou o cálculo falhe por dados incompletos.
+    if tempo:
+        try:
+            result_o = _retry(lambda: service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{sheet_name}'!O{row_num}",
+            ).execute())
+            valor_o_atual = (result_o.get("values") or [[""]])[0][0] if result_o.get("values") else ""
+        except Exception as exc:
+            log.warning("Leitura coluna O falhou | id=%s | erro=%s — assumindo vazia", id_ocorrencia, exc)
+            valor_o_atual = ""
+
+        if not valor_o_atual:
+            updates.append((f"'{sheet_name}'!O{row_num}", tempo))
+            log.info("UPDATE | id=%s | coluna O → %s", id_ocorrencia, tempo)
+        else:
+            log.debug("UPDATE | id=%s | coluna O já preenchida (%s) — mantendo", id_ocorrencia, valor_o_atual)
+    else:
+        log.warning("UPDATE | id=%s | tempo de atendimento não calculado — coluna O não alterada", id_ocorrencia)
 
     data_body = {
         "valueInputOption": "USER_ENTERED",
-        "data": [{"range": rng, "values": [[val]]} for rng, val in updates],
+        "data": [
+            {"range": rng, "values": [[val]]}
+            for rng, val in updates
+        ],
     }
 
     def _write():
@@ -343,7 +415,9 @@ def update_ocorrencia_normalizada(
 
     try:
         result = _retry(_write)
-        log.info("UPDATE OK | id=%s | row=%d", id_ocorrencia, row_num)
+        log.info("UPDATE OK | id=%s | row=%d | totalUpdated=%s",
+                 id_ocorrencia, row_num,
+                 result.get("totalUpdatedCells"))
         return True
     except Exception as exc:
         log.error("UPDATE FAIL | id=%s | erro=%s", id_ocorrencia, exc)
@@ -351,178 +425,28 @@ def update_ocorrencia_normalizada(
 
 
 # ---------------------------------------------
-# API pública – UPDATE DATA_PLANTAO (herança)
-# ---------------------------------------------
-
-def update_data_plantao(
-    cliente_config: dict,
-    id_ocorrencia: str,
-    nova_data: str,
-    dry_run: bool = False,
-) -> bool:
-    """
-    Atualiza apenas a coluna C (DATA_PLANTAO) na planilha.
-    Usado para herança de pendências entre dias.
-    """
-    spreadsheet_id = cliente_config["spreadsheet_id"]
-    sheet_name = cliente_config["sheet_name"]
-
-    log.info("DATA_REF | id=%s | nova_data=%s | dry_run=%s", id_ocorrencia, nova_data, dry_run)
-
-    if dry_run:
-        return True
-
-    service = get_sheets_service()
-    row_num = _encontrar_linha(service, spreadsheet_id, sheet_name, id_ocorrencia)
-    if row_num is None:
-        log.warning("DATA_REF | linha não encontrada para id=%s", id_ocorrencia)
-        return False
-
-    range_c = f"'{sheet_name}'!C{row_num}"
-
-    def _write():
-        return (
-            service.spreadsheets()
-            .values()
-            .update(
-                spreadsheetId=spreadsheet_id,
-                range=range_c,
-                valueInputOption="RAW",
-                body={"values": [[nova_data]]},
-            )
-            .execute()
-        )
-
-    try:
-        result = _retry(_write)
-        log.info("DATA_REF OK | id=%s | row=%d | nova_data=%s", id_ocorrencia, row_num, nova_data)
-        return True
-    except Exception as exc:
-        log.error("DATA_REF FAIL | id=%s | erro=%s", id_ocorrencia, exc)
-        return False
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Substitui a lógica de "sobrescrever coluna C" por "inserir nova linha"
-# ─────────────────────────────────────────────────────────────────────────────
-
-def append_heranca_diaria(
-    cliente_config: dict,
-    dados_ocorrencia: dict,
-    id_ocorrencia: str,
-    data_plantao: str,
-    dry_run: bool = False,
-) -> bool:
-    """
-    Insere uma nova linha para ocorrência pendente herdada entre dias.
-
-    Regras:
-      - Coluna R (ID_OCORRENCIA) → mesmo id_ocorrencia original
-      - Coluna G (DATA_INICIO)   → data do primeiro dia (vem do Firebase via dados_ocorrencia)
-      - Coluna C (DATA_PLANTAO)  → data_plantao (data do plantão atual, passada explicitamente)
-      - Colunas J/K/L/M/O        → vazias (ainda pendente)
-
-    Deduplicação: se já existe uma linha com esse id_ocorrencia E essa data_plantao
-    na coluna C, a inserção é ignorada (evita duplicatas em re-execuções).
-    """
-    spreadsheet_id = cliente_config["spreadsheet_id"]
-    sheet_name     = cliente_config["sheet_name"]
-
-    # Monta a linha com os dados originais do Firebase
-    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
-
-    # Sobrescreve coluna C com a data do plantão atual (índice 2)
-    row[2] = _fmt_date(data_plantao)
-
-    log.info(
-        "HERANÇA APPEND | id=%s | data_plantao=%s | data_inicio=%s | dry_run=%s",
-        id_ocorrencia, row[2], row[6], dry_run,
-    )
-
-    if dry_run:
-        log.info("DRY_RUN HERANÇA – linha: %s", row)
-        return True
-
-    service = get_sheets_service()
-
-    # ── Deduplicação: evita inserir a mesma data_plantao duas vezes ──────────
-    # Lê colunas C e R para checar par (id_ocorrencia, data_plantao)
-    try:
-        result_cr = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=f"'{sheet_name}'!C:R",
-        ).execute()
-        valores_cr = result_cr.get("values", [])
-        col_c_idx = 0          # C é a 1ª coluna do range C:R
-        col_r_idx = 15         # R é a 16ª coluna do range C:R (R - C = 15)
-        data_plantao_fmt = _fmt_date(data_plantao)
-        for linha_vals in valores_cr:
-            c_val = linha_vals[col_c_idx] if len(linha_vals) > col_c_idx else ""
-            r_val = linha_vals[col_r_idx] if len(linha_vals) > col_r_idx else ""
-            if r_val == id_ocorrencia and c_val == data_plantao_fmt:
-                log.info(
-                    "HERANÇA SKIP (já existe) | id=%s | data_plantao=%s",
-                    id_ocorrencia, data_plantao_fmt,
-                )
-                return True   # Considera sucesso — não é falha, só duplicata
-    except Exception as exc:
-        log.warning("HERANÇA dedup check falhou | id=%s | erro=%s – prosseguindo", id_ocorrencia, exc)
-
-    # ── Append ───────────────────────────────────────────────────────────────
-    range_a1 = f"'{sheet_name}'!A:R"
-
-    def _write():
-        return (
-            service.spreadsheets()
-            .values()
-            .append(
-                spreadsheetId=spreadsheet_id,
-                range=range_a1,
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]},
-            )
-            .execute()
-        )
-
-    try:
-        result = _retry(_write)
-        log.info(
-            "HERANÇA APPEND OK | id=%s | data_plantao=%s | updatedRows=%s",
-            id_ocorrencia, row[2], result.get("updates", {}).get("updatedRows"),
-        )
-        _invalidar_cache_linha(spreadsheet_id, sheet_name)
-        return True
-    except Exception as exc:
-        log.error("HERANÇA APPEND FAIL | id=%s | erro=%s", id_ocorrencia, exc)
-        return False
-
-
-
-# ---------------------------------------------
 # Cursor Firebase
 # ---------------------------------------------
 
 def get_cursor(cursor_node: str) -> dict:
-    """Lê o cursor de exportação do Firebase."""
+    """
+    Lê o cursor de exportação do Firebase.
+    Retorna {'ultimo_ts': ..., 'ultima_atualizacao': ...}
+    """
     try:
         ref = rtdb.reference(cursor_node)
         val = ref.get() or {}
         return {
             "ultimo_ts": val.get("ultimo_ts", 0),
             "ultima_atualizacao": val.get("ultima_atualizacao", 0),
-            "ultimo_dataReferencia": val.get("ultimo_dataReferencia", 0),
         }
     except Exception as exc:
         log.error("get_cursor FAIL | node=%s | erro=%s", cursor_node, exc)
-        return {"ultimo_ts": 0, "ultima_atualizacao": 0, "ultimo_dataReferencia": 0}
+        return {"ultimo_ts": 0, "ultima_atualizacao": 0}
 
 
-def update_cursor(
-    cursor_node: str,
-    ultimo_ts: Optional[int] = None,
-    ultima_atualizacao: Optional[int] = None,
-    ultimo_dataReferencia: Optional[int] = None,
-):
+def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
+                  ultima_atualizacao: Optional[int] = None):
     """Atualiza o cursor de exportação no Firebase."""
     try:
         ref = rtdb.reference(cursor_node)
@@ -531,8 +455,6 @@ def update_cursor(
             patch["ultimo_ts"] = ultimo_ts
         if ultima_atualizacao is not None:
             patch["ultima_atualizacao"] = ultima_atualizacao
-        if ultimo_dataReferencia is not None:
-            patch["ultimo_dataReferencia"] = ultimo_dataReferencia
         if patch:
             ref.update(patch)
             log.info("cursor atualizado | node=%s | patch=%s", cursor_node, patch)
