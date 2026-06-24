@@ -403,10 +403,13 @@ def update_ocorrencia_normalizada(
     data_fim    = str(dados_fim.get("data_fim",    "")).strip()
     hora_fim    = str(dados_fim.get("hora_fim",    "")).strip()
 
-    pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
-    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
-    pl_raw = str(dados_fim.get("pl", "")).strip()
-    status_atual = pl_map.get(pl_raw, pl_raw.upper() if pl_raw else "NORMALIZADO")
+    # Esta função é chamada EXCLUSIVAMENTE para normalizações.
+    # Status M sempre = NORMALIZADO, independente do campo 'pl'.
+    # Bug anterior: pl="atend" (card despachado) mapeava para "EM ATENDIMENTO".
+    status_atual = "NORMALIZADO"
+
+    # Observação — escrita com regra if_not_empty (não apaga obs existente)
+    observacoes = str(dados_fim.get("observacoes", "")).strip()
 
     tempo = calcular_tempo_atendimento(data_inicio, hora_inicio, data_fim, hora_fim)
 
@@ -414,14 +417,15 @@ def update_ocorrencia_normalizada(
              id_ocorrencia, data_fim, hora_fim, tempo, dry_run)
 
     if dry_run:
-        log.info("DRY_RUN – dados que seriam atualizados: data_fim=%s, hora_fim=%s, tempo=%s, status=%s",
-                 data_fim, hora_fim, tempo, status_atual)
+        log.info("DRY_RUN – dados que seriam atualizados: data_fim=%s, hora_fim=%s, tempo=%s, status=%s, obs=%s",
+                 data_fim, hora_fim, tempo, status_atual, observacoes[:50] if observacoes else "")
         return True
 
     service = get_sheets_service()
 
     row_num = _encontrar_linha(service, spreadsheet_id, sheet_name, id_ocorrencia)
     if row_num is None:
+        log.warning("UPDATE | linha não encontrada para id=%s", id_ocorrencia)
         log.error("UPDATE FAIL | id=%s | linha não encontrada na planilha", id_ocorrencia)
         return False
 
@@ -432,6 +436,13 @@ def update_ocorrencia_normalizada(
         (f"'{sheet_name}'!L{row_num}", _concat_data_hora(data_fim, hora_fim)),
         (f"'{sheet_name}'!M{row_num}", status_atual),
     ]
+
+    # ── Coluna Q (Observações) — if_not_empty ─────────────────────────────
+    # Só grava se o Firebase trouxer observação não-vazia.
+    # Nunca sobrescreve com string vazia — evita apagar obs preenchidas manualmente.
+    if observacoes:
+        updates.append((f"'{sheet_name}'!Q{row_num}", observacoes))
+        log.info("UPDATE | id=%s | observacoes → %d chars", id_ocorrencia, len(observacoes))
 
     # ── Coluna O (Tempo de Atendimento) — write-once ──────────────────────
     # Só grava se: (1) o cálculo retornou valor e (2) a célula está vazia.
