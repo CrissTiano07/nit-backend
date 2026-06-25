@@ -50,9 +50,17 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
     ocorrencias_node = cliente_config.get("ocorrencias_node", "/ocorrencias")
 
     cursor                  = get_cursor(cursor_node)
-    ultimo_ts               = cursor.get("ultimo_ts", 0)
-    ultima_atualizacao      = cursor.get("ultima_atualizacao", 0)
-    ultimo_dataReferencia   = cursor.get("ultimo_dataReferencia", 0)
+    # Garante que os valores do cursor sejam sempre inteiros,
+    # mesmo se o Firebase retornar string (edição manual no console).
+    def _int(val, default=0):
+        try:
+            return int(val or default)
+        except (TypeError, ValueError):
+            return default
+
+    ultimo_ts               = _int(cursor.get("ultimo_ts",             0))
+    ultima_atualizacao      = _int(cursor.get("ultima_atualizacao",    0))
+    ultimo_dataReferencia   = _int(cursor.get("ultimo_dataReferencia", 0))
 
     log.info("[%s] iniciando | ultimo_ts=%s | ultima_atualizacao=%s", cliente_id, ultimo_ts, ultima_atualizacao)
 
