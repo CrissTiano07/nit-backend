@@ -32,7 +32,7 @@
       "scn": "codigo",
       "localizacao": "endereco",
       "data_plantao": "dataReferencia",
-      "plantonista": "operador",
+      "plantonista": "plantonista",
       "status_falha": "problema",
       "causa": "tipo",
       "data_inicio": "inicio",
