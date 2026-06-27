@@ -83,29 +83,11 @@ def calcular_tempo_atendimento(
 ) -> str:
     """
     Calcula duração entre início e fim.
-    Aceita datas em DD/MM/YYYY ou YYYY-MM-DD.
     Retorna string HH:MM:SS ou '' em caso de dados incompletos.
     """
-    def _normalizar_data(data: str) -> str:
-        """Converte DD/MM/YYYY → YYYY-MM-DD para compatibilidade com strptime."""
-        data = str(data).strip()[:10]
-        if "/" in data:
-            partes = data.split("/")
-            if len(partes) == 3:
-                return f"{partes[2]}-{partes[1]}-{partes[0]}"
-        return data  # já está em YYYY-MM-DD ou formato livre
-
     try:
-        d_ini = _normalizar_data(data_inicio)
-        d_fim = _normalizar_data(data_fim)
-        h_ini = str(hora_inicio).strip()[:5]
-        h_fim = str(hora_fim).strip()[:5]
-
-        if not d_ini or not d_fim or not h_ini or not h_fim:
-            return ""
-
-        dt_in  = datetime.strptime(f"{d_ini} {h_ini}", "%Y-%m-%d %H:%M")
-        dt_fim = datetime.strptime(f"{d_fim} {h_fim}", "%Y-%m-%d %H:%M")
+        dt_in  = datetime.strptime(f"{data_inicio[:10]} {hora_inicio[:5]}", "%Y-%m-%d %H:%M")
+        dt_fim = datetime.strptime(f"{data_fim[:10]}  {hora_fim[:5]}",  "%Y-%m-%d %H:%M")
         delta  = dt_fim - dt_in
         if delta.total_seconds() < 0:
             return ""
@@ -171,7 +153,7 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
         "",                                                     # K – HORA_FIM
         "",                                                     # L – DATA_HORA_FIM
         status_atual or "AGUARDANDO",                           # M – STATUS_ATUAL
-        sub_map.get(str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")),  # N – OPERANDO_CRUZAMENTO
+        dados.get("colunaN") or sub_map.get(str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")),  # N – OPERANDO_CRUZAMENTO
         "",                                                     # O – TEMPO DE ATENDIMENTO
         fb("bairro"),                                           # P – BAIRRO
         fb("observacoes"),                                      # Q – OBSERVAÇÕES
@@ -311,65 +293,6 @@ def append_nova_ocorrencia(
         return False
 
 
-def append_heranca_diaria(
-    cliente_config: dict,
-    dados_ocorrencia: dict,
-    id_ocorrencia: str,
-    data_plantao: str,
-    dry_run: bool = False,
-) -> bool:
-    """
-    Insere nova linha para ocorrência pendente que persiste em novo dia de plantão.
-    Coluna C (DATA_PLANTAO) = data_plantao (data atual do plantão)
-    Coluna G (DATA_INICIO)  = data original da ocorrência (inalterada)
-    Coluna R (ID_OCORRENCIA)= mesmo id original (rastreabilidade)
-    """
-    spreadsheet_id = cliente_config["spreadsheet_id"]
-    sheet_name     = cliente_config["sheet_name"]
-
-    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
-
-    # Sobrescreve coluna C (índice 2) com a data do plantão atual
-    row[2] = _fmt_date(data_plantao)
-
-    inicio_raw   = str(dados_ocorrencia.get("inicio", "")).strip()
-    data_inicio_log = inicio_raw.split(" ")[0] if " " in inicio_raw else inicio_raw
-
-    log.info("HERANÇA APPEND | id=%s | data_plantao=%s | data_inicio=%s | dry_run=%s",
-             id_ocorrencia, data_plantao, data_inicio_log, dry_run)
-
-    if dry_run:
-        log.info("DRY_RUN HERANÇA – linha que seria inserida: %s", row)
-        return True
-
-    service  = get_sheets_service()
-    range_a1 = f"'{sheet_name}'!A:R"
-
-    def _write():
-        return (
-            service.spreadsheets()
-            .values()
-            .append(
-                spreadsheetId=spreadsheet_id,
-                range=range_a1,
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]},
-            )
-            .execute()
-        )
-
-    try:
-        result = _retry(_write)
-        log.info("HERANÇA APPEND OK | id=%s | updatedRows=%s",
-                 id_ocorrencia, result.get("updates", {}).get("updatedRows"))
-        _invalidar_cache_linha(spreadsheet_id, sheet_name)
-        return True
-    except Exception as exc:
-        log.error("HERANÇA APPEND FAIL | id=%s | erro=%s", id_ocorrencia, exc)
-        return False
-
-
 def update_ocorrencia_normalizada(
     cliente_config: dict,
     id_ocorrencia: str,
@@ -391,25 +314,15 @@ def update_ocorrencia_normalizada(
     spreadsheet_id = cliente_config["spreadsheet_id"]
     sheet_name     = cliente_config["sheet_name"]
 
-    # Firebase guarda início como campo combinado "DD/MM/YYYY HH:MM" (campo 'inicio').
-    # Separar data e hora para calcular o tempo de atendimento.
-    inicio_raw  = str(dados_fim.get("inicio", "")).strip()
-    if " " in inicio_raw:
-        data_inicio, hora_inicio = inicio_raw.split(" ", 1)
-    else:
-        data_inicio = inicio_raw
-        hora_inicio = ""
-
+    data_inicio = str(dados_fim.get("data_inicio", "")).strip()
+    hora_inicio = str(dados_fim.get("hora_inicio", "")).strip()
     data_fim    = str(dados_fim.get("data_fim",    "")).strip()
     hora_fim    = str(dados_fim.get("hora_fim",    "")).strip()
 
-    # Esta função é chamada EXCLUSIVAMENTE para normalizações.
-    # Status M sempre = NORMALIZADO, independente do campo 'pl'.
-    # Bug anterior: pl="atend" (card despachado) mapeava para "EM ATENDIMENTO".
-    status_atual = "NORMALIZADO"
-
-    # Observação — escrita com regra if_not_empty (não apaga obs existente)
-    observacoes = str(dados_fim.get("observacoes", "")).strip()
+    pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
+    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
+    pl_raw = str(dados_fim.get("pl", "")).strip()
+    status_atual = pl_map.get(pl_raw, pl_raw.upper() if pl_raw else "NORMALIZADO")
 
     tempo = calcular_tempo_atendimento(data_inicio, hora_inicio, data_fim, hora_fim)
 
@@ -417,55 +330,38 @@ def update_ocorrencia_normalizada(
              id_ocorrencia, data_fim, hora_fim, tempo, dry_run)
 
     if dry_run:
-        log.info("DRY_RUN – dados que seriam atualizados: data_fim=%s, hora_fim=%s, tempo=%s, status=%s, obs=%s",
-                 data_fim, hora_fim, tempo, status_atual, observacoes[:50] if observacoes else "")
+        log.info("DRY_RUN – dados que seriam atualizados: data_fim=%s, hora_fim=%s, tempo=%s, status=%s",
+                 data_fim, hora_fim, tempo, status_atual)
         return True
 
     service = get_sheets_service()
 
     row_num = _encontrar_linha(service, spreadsheet_id, sheet_name, id_ocorrencia)
     if row_num is None:
-        log.warning("UPDATE | linha não encontrada para id=%s", id_ocorrencia)
         log.error("UPDATE FAIL | id=%s | linha não encontrada na planilha", id_ocorrencia)
         return False
 
-    # ── Colunas J, K, L, M — sempre atualizadas na normalização ──────────
+    # Colunas J(10), K(11), L(12), M(13), O(15) – índice 1-based no A1
+    # Escrevemos range J:O da linha encontrada (inclui N que não alteramos, mas
+    # usamos valores já existentes seria complexo; aqui escrevemos apenas o range
+    # necessário com batch update por coluna individual para não sobrescrever N)
     updates = [
+        # (range_a1, valor)
         (f"'{sheet_name}'!J{row_num}", _fmt_date(data_fim)),
         (f"'{sheet_name}'!K{row_num}", _fmt_time(hora_fim)),
         (f"'{sheet_name}'!L{row_num}", _concat_data_hora(data_fim, hora_fim)),
         (f"'{sheet_name}'!M{row_num}", status_atual),
+        (f"'{sheet_name}'!O{row_num}", tempo),
     ]
 
-    # ── Coluna Q (Observações) — if_not_empty ─────────────────────────────
-    # Só grava se o Firebase trouxer observação não-vazia.
-    # Nunca sobrescreve com string vazia — evita apagar obs preenchidas manualmente.
-    if observacoes:
-        updates.append((f"'{sheet_name}'!Q{row_num}", observacoes))
-        log.info("UPDATE | id=%s | observacoes → %d chars", id_ocorrencia, len(observacoes))
-
-    # ── Coluna O (Tempo de Atendimento) — write-once ──────────────────────
-    # Só grava se: (1) o cálculo retornou valor e (2) a célula está vazia.
-    # Evita sobrescrever um tempo correto caso o cron rode duas vezes
-    # ou o cálculo falhe por dados incompletos.
-    if tempo:
-        try:
-            result_o = _retry(lambda: service.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id,
-                range=f"'{sheet_name}'!O{row_num}",
-            ).execute())
-            valor_o_atual = (result_o.get("values") or [[""]])[0][0] if result_o.get("values") else ""
-        except Exception as exc:
-            log.warning("Leitura coluna O falhou | id=%s | erro=%s — assumindo vazia", id_ocorrencia, exc)
-            valor_o_atual = ""
-
-        if not valor_o_atual:
-            updates.append((f"'{sheet_name}'!O{row_num}", tempo))
-            log.info("UPDATE | id=%s | coluna O → %s", id_ocorrencia, tempo)
-        else:
-            log.debug("UPDATE | id=%s | coluna O já preenchida (%s) — mantendo", id_ocorrencia, valor_o_atual)
-    else:
-        log.warning("UPDATE | id=%s | tempo de atendimento não calculado — coluna O não alterada", id_ocorrencia)
+    # ── Coluna N — atualiza com colunaN do histórico da Central da Ocorrência ──
+    # colunaN representa a sequência operacional completa: "VIA LIVRE", "VIA LIVRE + AMC",
+    # "VIA LIVRE → AMC", etc. Só grava se o campo existir no Firebase (cards da Central).
+    # Cards despachados pelo modal antigo não têm colunaN — coluna N mantém o valor do APPEND.
+    coluna_n_valor = str(dados_fim.get("colunaN", "")).strip()
+    if coluna_n_valor:
+        updates.append((f"'{sheet_name}'!N{row_num}", coluna_n_valor))
+        log.info("UPDATE | id=%s | coluna N → %s", id_ocorrencia, coluna_n_valor)
 
     data_body = {
         "valueInputOption": "USER_ENTERED",
@@ -516,8 +412,7 @@ def get_cursor(cursor_node: str) -> dict:
 
 
 def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
-                  ultima_atualizacao: Optional[int] = None,
-                  ultimo_dataReferencia: Optional[int] = None):
+                  ultima_atualizacao: Optional[int] = None):
     """Atualiza o cursor de exportação no Firebase."""
     try:
         ref = rtdb.reference(cursor_node)
@@ -526,8 +421,6 @@ def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
             patch["ultimo_ts"] = ultimo_ts
         if ultima_atualizacao is not None:
             patch["ultima_atualizacao"] = ultima_atualizacao
-        if ultimo_dataReferencia is not None:
-            patch["ultimo_dataReferencia"] = ultimo_dataReferencia
         if patch:
             ref.update(patch)
             log.info("cursor atualizado | node=%s | patch=%s", cursor_node, patch)
