@@ -447,16 +447,18 @@ def get_cursor(cursor_node: str) -> dict:
         ref = rtdb.reference(cursor_node)
         val = ref.get() or {}
         return {
-            "ultimo_ts": val.get("ultimo_ts", 0),
-            "ultima_atualizacao": val.get("ultima_atualizacao", 0),
+            "ultimo_ts":             val.get("ultimo_ts",             0),
+            "ultima_atualizacao":    val.get("ultima_atualizacao",    0),
+            "ultimo_dataReferencia": val.get("ultimo_dataReferencia", 0),
         }
     except Exception as exc:
         log.error("get_cursor FAIL | node=%s | erro=%s", cursor_node, exc)
-        return {"ultimo_ts": 0, "ultima_atualizacao": 0}
+        return {"ultimo_ts": 0, "ultima_atualizacao": 0, "ultimo_dataReferencia": 0}
 
 
 def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
-                  ultima_atualizacao: Optional[int] = None):
+                  ultima_atualizacao: Optional[int] = None,
+                  ultimo_dataReferencia: Optional[int] = None):
     """Atualiza o cursor de exportação no Firebase."""
     try:
         ref = rtdb.reference(cursor_node)
@@ -465,6 +467,8 @@ def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
             patch["ultimo_ts"] = ultimo_ts
         if ultima_atualizacao is not None:
             patch["ultima_atualizacao"] = ultima_atualizacao
+        if ultimo_dataReferencia is not None:
+            patch["ultimo_dataReferencia"] = ultimo_dataReferencia
         if patch:
             ref.update(patch)
             log.info("cursor atualizado | node=%s | patch=%s", cursor_node, patch)
