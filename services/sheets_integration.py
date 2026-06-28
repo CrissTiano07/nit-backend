@@ -65,14 +65,14 @@ def _fmt_date(val: Optional[str]) -> str:
             return d.strftime("%d/%m/%Y")
         except ValueError:
             pass
-    return val
+    return val  # já está no formato correto ou livre
 
 
 def _fmt_time(val: Optional[str]) -> str:
     """Retorna hora no formato HH:MM."""
     if not val:
         return ""
-    return str(val).strip()[:5]
+    return str(val).strip()[:5]  # trunca segundos se existirem
 
 
 def calcular_tempo_atendimento(
@@ -81,10 +81,28 @@ def calcular_tempo_atendimento(
     data_fim: str,
     hora_fim: str,
 ) -> str:
-    """Calcula duração entre início e fim. Retorna HH:MM:SS ou ''."""
+    """
+    Calcula duração entre início e fim. Retorna HH:MM:SS ou ''.
+    Aceita datas em DD/MM/YYYY ou YYYY-MM-DD.
+    """
+    def _normalizar(data: str) -> str:
+        """Converte DD/MM/YYYY → YYYY-MM-DD para compatibilidade com strptime."""
+        data = str(data).strip()[:10]
+        if "/" in data:
+            partes = data.split("/")
+            if len(partes) == 3:
+                return f"{partes[2]}-{partes[1]}-{partes[0]}"
+        return data
+
     try:
-        dt_in  = datetime.strptime(f"{data_inicio[:10]} {hora_inicio[:5]}", "%Y-%m-%d %H:%M")
-        dt_fim = datetime.strptime(f"{data_fim[:10]}  {hora_fim[:5]}",  "%Y-%m-%d %H:%M")
+        d_ini = _normalizar(data_inicio)
+        d_fim = _normalizar(data_fim)
+        h_ini = str(hora_inicio).strip()[:5]
+        h_fim = str(hora_fim).strip()[:5]
+        if not d_ini or not d_fim or not h_ini or not h_fim:
+            return ""
+        dt_in  = datetime.strptime(f"{d_ini} {h_ini}", "%Y-%m-%d %H:%M")
+        dt_fim = datetime.strptime(f"{d_fim} {h_fim}", "%Y-%m-%d %H:%M")
         delta  = dt_fim - dt_in
         if delta.total_seconds() < 0:
             return ""
@@ -122,34 +140,35 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
         chave = mp.get(campo_planilha, "")
         return str(dados.get(chave, "")).strip() if chave else ""
 
-    inicio_raw = fb("data_inicio")
+    # Campo "inicio" pode conter "DD/MM/AAAA HH:MM" — separar data e hora
+    inicio_raw = fb("data_inicio")  # mapeado para "inicio" no Firebase
     if " " in inicio_raw:
         data_inicio_raw, hora_inicio_raw = inicio_raw.split(" ", 1)
     else:
         data_inicio_raw = inicio_raw
         hora_inicio_raw = fb("hora_inicio")
 
+    # Tradução do campo pl → STATUS_ATUAL legível
     pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
+    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
     status_atual_raw = fb("status_atual")
     status_atual = pl_map.get(status_atual_raw, status_atual_raw.upper() if status_atual_raw else "")
 
     row = [
         fb("scn"),                                              # A – SCN
         fb("localizacao"),                                      # B – LOCALIZAÇÃO
-        _fmt_date(data_inicio_raw),                             # C – DATA_PLANTAO
+        _fmt_date(data_inicio_raw),                             # C – DATA_PLANTAO (usa data_inicio)
         fb("plantonista"),                                      # D – PLANTONISTA
         fb("status_falha").upper() if fb("status_falha") else "",  # E – STATUS_FALHA
         fb("causa").upper() if fb("causa") else "",             # F – CAUSA
         _fmt_date(data_inicio_raw),                             # G – DATA_INICIO
         _fmt_time(hora_inicio_raw),                             # H – HORA_INICIO
         _concat_data_hora(data_inicio_raw, hora_inicio_raw),    # I – DATA_HORA_IN
-        "",                                                     # J – DATA_FIM
+        "",                                                     # J – DATA_FIM (vazio na criação)
         "",                                                     # K – HORA_FIM
         "",                                                     # L – DATA_HORA_FIM
         status_atual or "AGUARDANDO",                           # M – STATUS_ATUAL
-        dados.get("colunaN") or {"vl": "VIA LIVRE", "amc": "AMC"}.get(
-            str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")
-        ),                                                      # N – OPERANDO_CRUZAMENTO
+        dados.get("colunaN") or sub_map.get(str(dados.get("sub", "")).strip().lower(), fb("operando_cruzamento")),  # N – OPERANDO_CRUZAMENTO
         "",                                                     # O – TEMPO DE ATENDIMENTO
         fb("bairro"),                                           # P – BAIRRO
         fb("observacoes"),                                      # Q – OBSERVAÇÕES
@@ -163,7 +182,7 @@ def _montar_linha_nova(dados: dict, cfg: dict, id_ocorrencia: str) -> list:
 # ---------------------------------------------
 
 def _retry(fn, max_tries=3, base_delay=2):
-    """Executa fn com retry exponencial."""
+    """Executa fn com retry exponencial. Lança a última exceção se esgotar."""
     for attempt in range(1, max_tries + 1):
         try:
             return fn()
@@ -180,9 +199,14 @@ def _retry(fn, max_tries=3, base_delay=2):
 # ---------------------------------------------
 # Cache em memória: coluna R por planilha
 # ---------------------------------------------
+# Chave: (spreadsheet_id, sheet_name)
+# Valor: dict {id_ocorrencia: row_number_1based}
+# Poupa chamadas à API quando várias ocorrências são normalizadas no mesmo ciclo.
+# Invalidar com _invalidar_cache_linha() sempre que o append inserir uma nova linha.
 _cache_coluna_r: dict = {}
 
 def _invalidar_cache_linha(spreadsheet_id: str, sheet_name: str):
+    """Descarta o cache da coluna R para forçar releitura no próximo ciclo."""
     _cache_coluna_r.pop((spreadsheet_id, sheet_name), None)
 
 
@@ -193,8 +217,10 @@ def _invalidar_cache_linha(spreadsheet_id: str, sheet_name: str):
 def _encontrar_linha(service, spreadsheet_id: str, sheet_name: str, id_ocorrencia: str) -> Optional[int]:
     """
     Percorre a coluna R para encontrar o índice (1-based) da linha com o ID.
-    Se houver duplicatas (herança diária gera múltiplas linhas com mesmo ID),
-    retorna a ÚLTIMA ocorrência — que é sempre a mais recente.
+    Usa cache em memória dentro do mesmo ciclo de exportação: a coluna R é lida
+    apenas uma vez por planilha, independente de quantas ocorrências precisem
+    ser localizadas (eficiente para planilhas com milhares de linhas).
+    Retorna None se não encontrar.
     """
     cache_key = (spreadsheet_id, sheet_name)
 
@@ -211,7 +237,6 @@ def _encontrar_linha(service, spreadsheet_id: str, sheet_name: str, id_ocorrenci
 
         result = _retry(_read)
         values = result.get("values", [])
-        # Dict comprehension: última ocorrência de cada ID vence (herança diária)
         _cache_coluna_r[cache_key] = {
             cell[0]: i + 1
             for i, cell in enumerate(values)
@@ -233,7 +258,18 @@ def append_nova_ocorrencia(
     id_ocorrencia: str,
     dry_run: bool = False,
 ) -> bool:
-    """Adiciona uma nova linha ao final da planilha."""
+    """
+    Adiciona uma nova linha ao final da planilha.
+
+    Args:
+        cliente_config: bloco do clientes.json para o cliente
+        dados_ocorrencia: dict vindo do Firebase
+        id_ocorrencia: chave do nó no Firebase (usada como ID único na coluna R)
+        dry_run: se True, apenas loga sem escrever
+
+    Returns:
+        True em sucesso, False em falha
+    """
     spreadsheet_id = cliente_config["spreadsheet_id"]
     sheet_name     = cliente_config["sheet_name"]
     row            = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
@@ -264,96 +300,11 @@ def append_nova_ocorrencia(
     try:
         result = _retry(_write)
         log.info("APPEND OK | updates=%s", result.get("updates", {}).get("updatedRows"))
+        # Invalida cache da coluna R: a nova linha mudou o índice potencial de buscas futuras
         _invalidar_cache_linha(spreadsheet_id, sheet_name)
         return True
     except Exception as exc:
         log.error("APPEND FAIL | id=%s | erro=%s", id_ocorrencia, exc)
-        return False
-
-
-def append_heranca_diaria(
-    cliente_config: dict,
-    dados_ocorrencia: dict,
-    id_ocorrencia: str,
-    data_plantao: str = "",
-    dry_run: bool = False,
-) -> bool:
-    """
-    Registra herança diária de uma ocorrência pendente na planilha.
-
-    Quando uma ocorrência atravessa a virada do dia sem ser normalizada,
-    o próximo plantão a herda. Isso gera uma nova linha na planilha com:
-      - DATA_PLANTAO (col C) = data do novo plantão
-      - Início original preservado (cols G, H, I)
-      - Status = EM ATENDIMENTO
-      - Fim/tempo zerados (cols J, K, L, O)
-      - Mesmo ID_OCORRENCIA (col R) → _encontrar_linha retorna a última linha
-        (mais recente), então update_ocorrencia_normalizada atualiza esta.
-
-    Args:
-        cliente_config: bloco do clientes.json
-        dados_ocorrencia: dict do Firebase (nó completo)
-        id_ocorrencia: chave do nó Firebase
-        data_plantao: data do novo plantão de referência (DD/MM/AAAA ou AAAA-MM-DD)
-        dry_run: se True, apenas loga sem escrever
-
-    Returns:
-        True em sucesso, False em falha
-    """
-    spreadsheet_id = cliente_config["spreadsheet_id"]
-    sheet_name     = cliente_config["sheet_name"]
-
-    # Monta linha base e ajusta campos de herança
-    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
-
-    # C (índice 2) — DATA_PLANTAO → novo dia de referência
-    if data_plantao:
-        row[2] = _fmt_date(data_plantao)
-
-    # M (índice 12) — STATUS_ATUAL → sempre EM ATENDIMENTO na herança
-    row[12] = "EM ATENDIMENTO"
-
-    # J, K, L (índices 9–11) — fim → vazio (ainda não normalizado)
-    row[9]  = ""
-    row[10] = ""
-    row[11] = ""
-
-    # O (índice 14) — TEMPO ATENDIMENTO → vazio
-    row[14] = ""
-
-    log.info("HERANÇA | id=%s | data_plantao=%s | scn=%s | dry_run=%s",
-             id_ocorrencia, data_plantao, row[0], dry_run)
-
-    if dry_run:
-        log.info("DRY_RUN HERANÇA – linha que seria inserida: %s", row)
-        return True
-
-    service  = get_sheets_service()
-    range_a1 = f"'{sheet_name}'!A:R"
-
-    def _write():
-        return (
-            service.spreadsheets()
-            .values()
-            .append(
-                spreadsheetId=spreadsheet_id,
-                range=range_a1,
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]},
-            )
-            .execute()
-        )
-
-    try:
-        result = _retry(_write)
-        log.info("HERANÇA OK | id=%s | updates=%s",
-                 id_ocorrencia, result.get("updates", {}).get("updatedRows"))
-        # Invalida cache: nova linha altera índices de busca futuros
-        _invalidar_cache_linha(spreadsheet_id, sheet_name)
-        return True
-    except Exception as exc:
-        log.error("HERANÇA FAIL | id=%s | erro=%s", id_ocorrencia, exc)
         return False
 
 
@@ -365,19 +316,33 @@ def update_ocorrencia_normalizada(
 ) -> bool:
     """
     Atualiza as colunas de finalização de uma ocorrência já existente na planilha.
-    Se houver múltiplas linhas com o mesmo ID (herança diária), atualiza a última.
+
+    Args:
+        cliente_config: bloco do clientes.json
+        id_ocorrencia: ID Firebase para localizar a linha
+        dados_fim: dict com data_fim, hora_fim, data_inicio, hora_inicio, equipe, pl, etc.
+        dry_run: se True, não escreve
+
+    Returns:
+        True em sucesso, False em falha
     """
     spreadsheet_id = cliente_config["spreadsheet_id"]
     sheet_name     = cliente_config["sheet_name"]
 
-    data_inicio = str(dados_fim.get("data_inicio", "")).strip()
-    hora_inicio = str(dados_fim.get("hora_inicio", "")).strip()
-    data_fim    = str(dados_fim.get("data_fim",    "")).strip()
-    hora_fim    = str(dados_fim.get("hora_fim",    "")).strip()
+    # Firebase guarda início como campo combinado "DD/MM/YYYY HH:MM" (campo 'inicio').
+    # Separar data e hora para calcular tempo de atendimento.
+    inicio_raw = str(dados_fim.get("inicio", "")).strip()
+    if " " in inicio_raw:
+        data_inicio, hora_inicio = inicio_raw.split(" ", 1)
+    else:
+        data_inicio = inicio_raw
+        hora_inicio = ""
 
-    pl_map = {"norm": "NORMALIZADO", "atend": "EM ATENDIMENTO", "aguard": "AGUARDANDO"}
-    pl_raw = str(dados_fim.get("pl", "")).strip()
-    status_atual = pl_map.get(pl_raw, pl_raw.upper() if pl_raw else "NORMALIZADO")
+    data_fim = str(dados_fim.get("data_fim", "")).strip()
+    hora_fim = str(dados_fim.get("hora_fim", "")).strip()
+
+    # Esta função é chamada exclusivamente para normalizações — M sempre NORMALIZADO.
+    status_atual = "NORMALIZADO"
 
     tempo = calcular_tempo_atendimento(data_inicio, hora_inicio, data_fim, hora_fim)
 
@@ -396,7 +361,12 @@ def update_ocorrencia_normalizada(
         log.error("UPDATE FAIL | id=%s | linha não encontrada na planilha", id_ocorrencia)
         return False
 
+    # Colunas J(10), K(11), L(12), M(13), O(15) – índice 1-based no A1
+    # Escrevemos range J:O da linha encontrada (inclui N que não alteramos, mas
+    # usamos valores já existentes seria complexo; aqui escrevemos apenas o range
+    # necessário com batch update por coluna individual para não sobrescrever N)
     updates = [
+        # (range_a1, valor)
         (f"'{sheet_name}'!J{row_num}", _fmt_date(data_fim)),
         (f"'{sheet_name}'!K{row_num}", _fmt_time(hora_fim)),
         (f"'{sheet_name}'!L{row_num}", _concat_data_hora(data_fim, hora_fim)),
@@ -404,7 +374,10 @@ def update_ocorrencia_normalizada(
         (f"'{sheet_name}'!O{row_num}", tempo),
     ]
 
-    # Coluna N — atualiza com colunaN do histórico da Central da Ocorrência
+    # ── Coluna N — atualiza com colunaN do histórico da Central da Ocorrência ──
+    # colunaN representa a sequência operacional completa: "VIA LIVRE", "VIA LIVRE + AMC",
+    # "VIA LIVRE → AMC", etc. Só grava se o campo existir no Firebase (cards da Central).
+    # Cards despachados pelo modal antigo não têm colunaN — coluna N mantém o valor do APPEND.
     coluna_n_valor = str(dados_fim.get("colunaN", "")).strip()
     if coluna_n_valor:
         updates.append((f"'{sheet_name}'!N{row_num}", coluna_n_valor))
@@ -442,23 +415,24 @@ def update_ocorrencia_normalizada(
 # ---------------------------------------------
 
 def get_cursor(cursor_node: str) -> dict:
-    """Lê o cursor de exportação do Firebase."""
+    """
+    Lê o cursor de exportação do Firebase.
+    Retorna {'ultimo_ts': ..., 'ultima_atualizacao': ...}
+    """
     try:
         ref = rtdb.reference(cursor_node)
         val = ref.get() or {}
         return {
-            "ultimo_ts":             val.get("ultimo_ts",             0),
-            "ultima_atualizacao":    val.get("ultima_atualizacao",    0),
-            "ultimo_dataReferencia": val.get("ultimo_dataReferencia", 0),
+            "ultimo_ts": val.get("ultimo_ts", 0),
+            "ultima_atualizacao": val.get("ultima_atualizacao", 0),
         }
     except Exception as exc:
         log.error("get_cursor FAIL | node=%s | erro=%s", cursor_node, exc)
-        return {"ultimo_ts": 0, "ultima_atualizacao": 0, "ultimo_dataReferencia": 0}
+        return {"ultimo_ts": 0, "ultima_atualizacao": 0}
 
 
 def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
-                  ultima_atualizacao: Optional[int] = None,
-                  ultimo_dataReferencia: Optional[int] = None):
+                  ultima_atualizacao: Optional[int] = None):
     """Atualiza o cursor de exportação no Firebase."""
     try:
         ref = rtdb.reference(cursor_node)
@@ -467,8 +441,6 @@ def update_cursor(cursor_node: str, ultimo_ts: Optional[int] = None,
             patch["ultimo_ts"] = ultimo_ts
         if ultima_atualizacao is not None:
             patch["ultima_atualizacao"] = ultima_atualizacao
-        if ultimo_dataReferencia is not None:
-            patch["ultimo_dataReferencia"] = ultimo_dataReferencia
         if patch:
             ref.update(patch)
             log.info("cursor atualizado | node=%s | patch=%s", cursor_node, patch)
