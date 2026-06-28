@@ -161,19 +161,16 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             update_cursor(cursor_node, ultimo_dataReferencia=novo_dataReferencia)
 
     # ── 4. Despachos ativos — coluna N ──────────────────────────────────
-    # Atualiza a coluna N de ocorrências ativas (não normalizadas) com o
-    # valor operacional atual. Prioridade: colunaN do Firebase (gravado pela
-    # Central da Ocorrência, contém sequência completa como "VIA LIVRE → AMC")
-    # → fallback para sub_map simples → fallback para sub bruto.
-    # ATENÇÃO: não filtra normalizados — a Seção 2 já cuida de escrever colunaN
-    # na normalização. Aqui só processamos registros ativos para manter N
-    # atualizado durante a operação (antes da normalização).
+    # Atualiza a coluna N de ocorrências ativas com o valor operacional atual.
+    # Prioridade: colunaN do Firebase → derivado do historico → sub_map simples.
+    # colunaN é gravado pelo frontend a partir desta versão; cards despachados
+    # antes do deploy não têm o campo — nesses casos derivamos do historico.
     all_oc_despacho = ref_oc.get() or {}
     despacho_query = {
         k: v for k, v in all_oc_despacho.items()
         if isinstance(v, dict)
         and str(v.get("sub", "")).strip().lower() in ("vl", "amc")
-        and v.get("status") != "NORMALIZADO"   # ← não reprocessar encerrados
+        and v.get("status") != "NORMALIZADO"
     }
 
     despachados = 0
@@ -181,13 +178,48 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
 
     sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
 
+    def _derivar_coluna_n(historico: dict, sub_fallback: str) -> str:
+        """Replica _derivarColunaN do frontend. despacho→segmento, apoio→+, rendição→→."""
+        if not historico:
+            return sub_map.get(sub_fallback, sub_fallback.upper())
+        eventos = sorted(historico.values(), key=lambda e: e.get("ts", 0))
+        segmentos, seg = [], []
+        label_map = {"vl": "VIA LIVRE", "amc": "AMC"}
+        for ev in eventos:
+            label = label_map.get(str(ev.get("sub", "")).strip().lower())
+            if not label:
+                continue
+            tipo = str(ev.get("tipo", "")).strip().lower()
+            if tipo == "despacho":
+                seg = [label]
+            elif tipo == "apoio":
+                if label not in seg:
+                    seg.append(label)
+            elif tipo in ("rendição", "rendicao", "rendição"):
+                if seg:
+                    segmentos.append(" + ".join(seg))
+                seg = [label]
+        if seg:
+            segmentos.append(" + ".join(seg))
+        return " → ".join(segmentos) if segmentos else sub_map.get(sub_fallback, sub_fallback.upper())
+
     for id_oc, dados in despacho_query.items():
         sub = str(dados.get("sub", "")).strip().lower()
         if not sub:
             continue
 
-        # Prioridade: colunaN gravado pela Central → sub_map simples → sub bruto
-        valor_n = dados.get("colunaN") or sub_map.get(sub, sub.upper())
+        # Prioridade 1: colunaN gravado pelo frontend (cards pós-deploy)
+        valor_n = dados.get("colunaN", "")
+
+        # Prioridade 2: derivar do historico (cards pré-deploy ou sem colunaN)
+        if not valor_n:
+            try:
+                hist_ref = rtdb.reference(f"{ocorrencias_node}/{id_oc}/historico")
+                hist     = hist_ref.get() or {}
+                valor_n  = _derivar_coluna_n(hist, sub)
+            except Exception as exc:
+                log.warning("DESPACHO histórico FAIL | id=%s | %s", id_oc, exc)
+                valor_n = sub_map.get(sub, sub.upper())
 
         if not dry_run:
             try:
@@ -199,7 +231,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 spreadsheet_id = cliente_config["spreadsheet_id"]
                 atual          = svc.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range=f"'{sheet_name}'!N{row_num}",
+                    range=f"\'{sheet_name}\'!N{row_num}",
                 ).execute()
                 valor_atual = (atual.get("values") or [[""]])[0][0] if atual.get("values") else ""
                 if valor_atual == valor_n:
@@ -208,7 +240,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 svc.spreadsheets().values().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={"valueInputOption": "RAW", "data": [
-                        {"range": f"'{sheet_name}'!N{row_num}", "values": [[valor_n]]}
+                        {"range": f"\'{sheet_name}\'!N{row_num}", "values": [[valor_n]]}
                     ]},
                 ).execute()
                 log.info("DESPACHO OK | id=%s | N=%s | row=%d", id_oc, valor_n, row_num)
@@ -228,7 +260,6 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         "dry_run": dry_run,
     }
     log.info("[%s] exportação concluída | %s", cliente_id, resultado)
-    return resultado
 
 
 @router.post("/api/v1/exportar")
