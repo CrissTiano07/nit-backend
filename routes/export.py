@@ -49,16 +49,16 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
     cursor_node      = cliente_config["cursor_node"]
     ocorrencias_node = cliente_config.get("ocorrencias_node", "/ocorrencias")
 
-    cursor                  = get_cursor(cursor_node)
+    cursor = get_cursor(cursor_node)
     def _int(val, default=0):
         try:
             return int(val or default)
         except (TypeError, ValueError):
             return default
 
-    ultimo_ts               = _int(cursor.get("ultimo_ts",             0))
-    ultima_atualizacao      = _int(cursor.get("ultima_atualizacao",    0))
-    ultimo_dataReferencia   = _int(cursor.get("ultimo_dataReferencia", 0))
+    ultimo_ts             = _int(cursor.get("ultimo_ts",             0))
+    ultima_atualizacao    = _int(cursor.get("ultima_atualizacao",    0))
+    ultimo_dataReferencia = _int(cursor.get("ultimo_dataReferencia", 0))
 
     log.info("[%s] iniciando | ultimo_ts=%s | ultima_atualizacao=%s", cliente_id, ultimo_ts, ultima_atualizacao)
 
@@ -123,7 +123,6 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         else:
             log.error(
                 "[%s] UPDATE falhou id=%s | linha não encontrada na planilha. "
-                "Verifique se o id_ocorrencia existe na coluna R. "
                 "Cursor NÃO avançado — será reprocessado.",
                 cliente_id, id_oc,
             )
@@ -161,10 +160,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             update_cursor(cursor_node, ultimo_dataReferencia=novo_dataReferencia)
 
     # ── 4. Despachos ativos — coluna N ──────────────────────────────────
-    # Atualiza a coluna N de ocorrências ativas com o valor operacional atual.
-    # Prioridade: colunaN do Firebase → derivado do historico → sub_map simples.
-    # colunaN é gravado pelo frontend a partir desta versão; cards despachados
-    # antes do deploy não têm o campo — nesses casos derivamos do historico.
+    # Prioridade: colunaN do Firebase → derivado do historico → sub_map simples
     all_oc_despacho = ref_oc.get() or {}
     despacho_query = {
         k: v for k, v in all_oc_despacho.items()
@@ -179,7 +175,6 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
     sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
 
     def _derivar_coluna_n(historico: dict, sub_fallback: str) -> str:
-        """Replica _derivarColunaN do frontend. despacho→segmento, apoio→+, rendição→→."""
         if not historico:
             return sub_map.get(sub_fallback, sub_fallback.upper())
         eventos = sorted(historico.values(), key=lambda e: e.get("ts", 0))
@@ -195,14 +190,12 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             elif tipo == "apoio":
                 if label not in seg:
                     seg.append(label)
-            elif tipo in ("rendição", "rendicao", "rendição"):
+            elif tipo in ("rendição", "rendicao"):
                 if seg:
                     segmentos.append(" + ".join(seg))
                 seg = [label]
         if seg:
             segmentos.append(" + ".join(seg))
-        # Para a planilha, relevante é a transição mais recente, não a cadeia histórica completa.
-        # Ex: card com 5 dias de operação → "VIA LIVRE → AMC" (último par), não a cadeia toda.
         if not segmentos:
             return sub_map.get(sub_fallback, sub_fallback.upper())
         if len(segmentos) == 1:
@@ -214,10 +207,8 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         if not sub:
             continue
 
-        # Prioridade 1: colunaN gravado pelo frontend (cards pós-deploy)
         valor_n = dados.get("colunaN", "")
 
-        # Prioridade 2: derivar do historico (cards pré-deploy ou sem colunaN)
         if not valor_n:
             try:
                 hist_ref = rtdb.reference(f"{ocorrencias_node}/{id_oc}/historico")
@@ -237,7 +228,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 spreadsheet_id = cliente_config["spreadsheet_id"]
                 atual          = svc.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range=f"\'{sheet_name}\'!N{row_num}",
+                    range=f"'{sheet_name}'!N{row_num}",
                 ).execute()
                 valor_atual = (atual.get("values") or [[""]])[0][0] if atual.get("values") else ""
                 if valor_atual == valor_n:
@@ -246,7 +237,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 svc.spreadsheets().values().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={"valueInputOption": "RAW", "data": [
-                        {"range": f"\'{sheet_name}\'!N{row_num}", "values": [[valor_n]]}
+                        {"range": f"'{sheet_name}'!N{row_num}", "values": [[valor_n]]}
                     ]},
                 ).execute()
                 log.info("DESPACHO OK | id=%s | N=%s | row=%d", id_oc, valor_n, row_num)
@@ -258,14 +249,15 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             despachados += 1
 
     resultado = {
-        "cliente": cliente_id,
-        "inseridos": inseridos,
+        "cliente":     cliente_id,
+        "inseridos":   inseridos,
         "atualizados": atualizados,
-        "herdados": herdados,
+        "herdados":    herdados,
         "despachados": despachados,
-        "dry_run": dry_run,
+        "dry_run":     dry_run,
     }
     log.info("[%s] exportação concluída | %s", cliente_id, resultado)
+    return resultado   # ← FIX: estava ausente — cron recebia None e crashava
 
 
 @router.post("/api/v1/exportar")
