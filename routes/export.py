@@ -50,8 +50,6 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
     ocorrencias_node = cliente_config.get("ocorrencias_node", "/ocorrencias")
 
     cursor                  = get_cursor(cursor_node)
-    # Garante que os valores do cursor sejam sempre inteiros,
-    # mesmo se o Firebase retornar string (edição manual no console).
     def _int(val, default=0):
         try:
             return int(val or default)
@@ -123,11 +121,6 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             atualizados += 1
             nova_atualizacao = max(nova_atualizacao, dados.get("ts_norm") or dados.get("ts", 0))
         else:
-            # ── Bug #18 fix: NÃO fazer fallback APPEND ──────────────────
-            # O fallback anterior criava linhas duplicadas e sobrescrevia
-            # observações corretas com dados incompletos do Firebase.
-            # A linha original na planilha permanece intacta.
-            # O cursor NÃO avança — o item será reprocessado no próximo ciclo.
             log.error(
                 "[%s] UPDATE falhou id=%s | linha não encontrada na planilha. "
                 "Verifique se o id_ocorrencia existe na coluna R. "
@@ -167,36 +160,48 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         if novo_dataReferencia > ultimo_dataReferencia and not dry_run:
             update_cursor(cursor_node, ultimo_dataReferencia=novo_dataReferencia)
 
-    # ── 4. Despachos (coluna N) ─────────────────────────────────────────
+    # ── 4. Despachos ativos — coluna N ──────────────────────────────────
+    # Atualiza a coluna N de ocorrências ativas (não normalizadas) com o
+    # valor operacional atual. Prioridade: colunaN do Firebase (gravado pela
+    # Central da Ocorrência, contém sequência completa como "VIA LIVRE → AMC")
+    # → fallback para sub_map simples → fallback para sub bruto.
+    # ATENÇÃO: não filtra normalizados — a Seção 2 já cuida de escrever colunaN
+    # na normalização. Aqui só processamos registros ativos para manter N
+    # atualizado durante a operação (antes da normalização).
     all_oc_despacho = ref_oc.get() or {}
     despacho_query = {
         k: v for k, v in all_oc_despacho.items()
-        if isinstance(v, dict) and str(v.get("sub", "")).strip().lower() in ("vl", "amc")
+        if isinstance(v, dict)
+        and str(v.get("sub", "")).strip().lower() in ("vl", "amc")
+        and v.get("status") != "NORMALIZADO"   # ← não reprocessar encerrados
     }
 
     despachados = 0
     from services.sheets_integration import get_sheets_service, _encontrar_linha
 
+    sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
+
     for id_oc, dados in despacho_query.items():
         sub = str(dados.get("sub", "")).strip().lower()
         if not sub:
             continue
-        sub_map  = {"vl": "VIA LIVRE", "amc": "AMC"}
-        valor_n  = sub_map.get(sub, sub.upper())
+
+        # Prioridade: colunaN gravado pela Central → sub_map simples → sub bruto
+        valor_n = dados.get("colunaN") or sub_map.get(sub, sub.upper())
 
         if not dry_run:
             try:
-                svc      = get_sheets_service()
-                row_num  = _encontrar_linha(svc, cliente_config["spreadsheet_id"], cliente_config["sheet_name"], id_oc)
+                svc            = get_sheets_service()
+                row_num        = _encontrar_linha(svc, cliente_config["spreadsheet_id"], cliente_config["sheet_name"], id_oc)
                 if not row_num:
                     continue
-                sheet_name   = cliente_config["sheet_name"]
+                sheet_name     = cliente_config["sheet_name"]
                 spreadsheet_id = cliente_config["spreadsheet_id"]
-                atual        = svc.spreadsheets().values().get(
+                atual          = svc.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
                     range=f"'{sheet_name}'!N{row_num}",
                 ).execute()
-                valor_atual  = (atual.get("values") or [[""]])[0][0] if atual.get("values") else ""
+                valor_atual = (atual.get("values") or [[""]])[0][0] if atual.get("values") else ""
                 if valor_atual == valor_n:
                     log.debug("DESPACHO SKIP | id=%s | N já=%s", id_oc, valor_n)
                     continue
