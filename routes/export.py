@@ -266,6 +266,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         "dry_run": dry_run,
     }
     log.info("[%s] exportação concluída | %s", cliente_id, resultado)
+    return resultado
 
 
 @router.post("/api/v1/exportar")
