@@ -201,7 +201,13 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 seg = [label]
         if seg:
             segmentos.append(" + ".join(seg))
-        return " → ".join(segmentos) if segmentos else sub_map.get(sub_fallback, sub_fallback.upper())
+        # Para a planilha, relevante é a transição mais recente, não a cadeia histórica completa.
+        # Ex: card com 5 dias de operação → "VIA LIVRE → AMC" (último par), não a cadeia toda.
+        if not segmentos:
+            return sub_map.get(sub_fallback, sub_fallback.upper())
+        if len(segmentos) == 1:
+            return segmentos[0]
+        return f"{segmentos[-2]} → {segmentos[-1]}"
 
     for id_oc, dados in despacho_query.items():
         sub = str(dados.get("sub", "")).strip().lower()
