@@ -16,7 +16,7 @@ from firebase_admin import db as rtdb
 from services.sheets_integration import (
     append_nova_ocorrencia,
     update_ocorrencia_normalizada,
-    append_heranca_diaria,
+    append_heranca_diaria,           
     get_cursor,
     update_cursor,
 )
@@ -49,38 +49,31 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
     cursor_node      = cliente_config["cursor_node"]
     ocorrencias_node = cliente_config.get("ocorrencias_node", "/ocorrencias")
 
-    cursor = get_cursor(cursor_node)
+    cursor                  = get_cursor(cursor_node)
     def _int(val, default=0):
         try:
             return int(val or default)
         except (TypeError, ValueError):
             return default
 
-    ultimo_ts             = _int(cursor.get("ultimo_ts",             0))
-    ultima_atualizacao    = _int(cursor.get("ultima_atualizacao",    0))
-    ultimo_dataReferencia = _int(cursor.get("ultimo_dataReferencia", 0))
+    ultimo_ts               = _int(cursor.get("ultimo_ts",             0))
+    ultima_atualizacao      = _int(cursor.get("ultima_atualizacao",    0))
+    ultimo_dataReferencia   = _int(cursor.get("ultimo_dataReferencia", 0))
 
     log.info("[%s] iniciando | ultimo_ts=%s | ultima_atualizacao=%s", cliente_id, ultimo_ts, ultima_atualizacao)
 
     ref_oc = rtdb.reference(ocorrencias_node)
 
     # ── 1. Novas ocorrências ────────────────────────────────────────────
-    # Usa ts_criacao (imutável) se disponível; fallback para ts (pode ser atualizado).
-    # Bug anterior: ts é atualizado por despacho/herança → card aparece como "novo"
-    # repetidamente. ts_criacao resolve isso, mas cards antigos não têm o campo.
     novas_query = (ref_oc.order_by_child("ts").start_at(ultimo_ts + 1).get()) or {}
     inseridos = 0
     novo_ts   = ultimo_ts
 
-    from services.sheets_integration import get_sheets_service, _encontrar_linha
-
     for id_oc, dados in novas_query.items():
         if not isinstance(dados, dict):
             continue
-
-        # Dedup: verifica planilha SEMPRE (não só se not dry_run)
-        # Evita inserção duplicada quando ts do card é atualizado por despacho/herança
         if not dry_run:
+            from services.sheets_integration import get_sheets_service, _encontrar_linha
             try:
                 svc = get_sheets_service()
                 if _encontrar_linha(svc, cliente_config["spreadsheet_id"], cliente_config["sheet_name"], id_oc):
@@ -111,7 +104,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             k: v for k, v in all_oc.items()
             if isinstance(v, dict)
             and v.get("status") == "NORMALIZADO"
-            and _int(v.get("ts_norm", v.get("ts", 0))) > ultima_atualizacao
+            and v.get("ts_norm", v.get("ts", 0)) > ultima_atualizacao
         }
 
     atualizados      = 0
@@ -126,10 +119,12 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         ok = update_ocorrencia_normalizada(cliente_config, id_oc, dados, dry_run=dry_run)
         if ok:
             atualizados += 1
-            nova_atualizacao = max(nova_atualizacao, _int(dados.get("ts_norm") or dados.get("ts", 0)))
+            nova_atualizacao = max(nova_atualizacao, dados.get("ts_norm") or dados.get("ts", 0))
         else:
             log.error(
-                "[%s] UPDATE falhou id=%s | linha não encontrada. Cursor NÃO avançado.",
+                "[%s] UPDATE falhou id=%s | linha não encontrada na planilha. "
+                "Verifique se o id_ocorrencia existe na coluna R. "
+                "Cursor NÃO avançado — será reprocessado.",
                 cliente_id, id_oc,
             )
 
@@ -137,10 +132,6 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         update_cursor(cursor_node, ultima_atualizacao=nova_atualizacao)
 
     # ── 3. Herança de dataReferencia ────────────────────────────────────
-    # FIX Bug #HERANÇA-LOOP: cada card só gera UMA linha de herança por data de plantão.
-    # Após inserção bem-sucedida, registra em Firebase:
-    #   {ocorrencias_node}/{id}/herancas_registradas/{data_key} = timestamp
-    # Nas rodadas seguintes, skip automático se a entrada já existe.
     dataRef_query = (
         ref_oc.order_by_child("ts_dataReferencia").start_at(ultimo_dataReferencia + 1).get()
     ) or {}
@@ -153,34 +144,15 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             continue
         if dados.get("status") == "NORMALIZADO":
             log.debug("HERANÇA SKIP normalizado | id=%s", id_oc)
-            novo_dataReferencia = max(novo_dataReferencia, _int(dados.get("ts_dataReferencia", 0)))
+            novo_dataReferencia = max(novo_dataReferencia, dados.get("ts_dataReferencia", 0))
             continue
         nova_data = dados.get("dataReferencia", "")
         if not nova_data:
             continue
-
-        # ── Idempotência: skip se herança desta data já foi registrada ──
-        data_key = nova_data.replace("/", "_")
-        heranca_node = f"{ocorrencias_node}/{id_oc}/herancas_registradas/{data_key}"
-        try:
-            ja_registrado = rtdb.reference(heranca_node).get()
-            if ja_registrado:
-                log.debug("HERANÇA SKIP | id=%s | data=%s já registrada", id_oc, nova_data)
-                novo_dataReferencia = max(novo_dataReferencia, _int(dados.get("ts_dataReferencia", 0)))
-                continue
-        except Exception as exc:
-            log.warning("HERANÇA check falhou id=%s: %s – prosseguindo", id_oc, exc)
-
         ok = append_heranca_diaria(cliente_config, dados, id_oc, data_plantao=nova_data, dry_run=dry_run)
         if ok:
             herdados += 1
-            novo_dataReferencia = max(novo_dataReferencia, _int(dados.get("ts_dataReferencia", 0)))
-            # Marca herança como registrada para esta data → evita loop
-            if not dry_run:
-                try:
-                    rtdb.reference(heranca_node).set(int(time.time() * 1000))
-                except Exception as exc:
-                    log.warning("HERANÇA mark falhou id=%s: %s", id_oc, exc)
+            novo_dataReferencia = max(novo_dataReferencia, dados.get("ts_dataReferencia", 0))
         else:
             log.error("[%s] HERANÇA APPEND falhou id=%s – cursor NÃO avançado", cliente_id, id_oc)
             break
@@ -189,6 +161,10 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             update_cursor(cursor_node, ultimo_dataReferencia=novo_dataReferencia)
 
     # ── 4. Despachos ativos — coluna N ──────────────────────────────────
+    # Atualiza a coluna N de ocorrências ativas com o valor operacional atual.
+    # Prioridade: colunaN do Firebase → derivado do historico → sub_map simples.
+    # colunaN é gravado pelo frontend a partir desta versão; cards despachados
+    # antes do deploy não têm o campo — nesses casos derivamos do historico.
     all_oc_despacho = ref_oc.get() or {}
     despacho_query = {
         k: v for k, v in all_oc_despacho.items()
@@ -198,9 +174,12 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
     }
 
     despachados = 0
+    from services.sheets_integration import get_sheets_service, _encontrar_linha
+
     sub_map = {"vl": "VIA LIVRE", "amc": "AMC"}
 
     def _derivar_coluna_n(historico: dict, sub_fallback: str) -> str:
+        """Replica _derivarColunaN do frontend. despacho→segmento, apoio→+, rendição→→."""
         if not historico:
             return sub_map.get(sub_fallback, sub_fallback.upper())
         eventos = sorted(historico.values(), key=lambda e: e.get("ts", 0))
@@ -216,12 +195,14 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             elif tipo == "apoio":
                 if label not in seg:
                     seg.append(label)
-            elif tipo in ("rendição", "rendicao"):
+            elif tipo in ("rendição", "rendicao", "rendição"):
                 if seg:
                     segmentos.append(" + ".join(seg))
                 seg = [label]
         if seg:
             segmentos.append(" + ".join(seg))
+        # Para a planilha, relevante é a transição mais recente, não a cadeia histórica completa.
+        # Ex: card com 5 dias de operação → "VIA LIVRE → AMC" (último par), não a cadeia toda.
         if not segmentos:
             return sub_map.get(sub_fallback, sub_fallback.upper())
         if len(segmentos) == 1:
@@ -233,7 +214,10 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
         if not sub:
             continue
 
+        # Prioridade 1: colunaN gravado pelo frontend (cards pós-deploy)
         valor_n = dados.get("colunaN", "")
+
+        # Prioridade 2: derivar do historico (cards pré-deploy ou sem colunaN)
         if not valor_n:
             try:
                 hist_ref = rtdb.reference(f"{ocorrencias_node}/{id_oc}/historico")
@@ -253,7 +237,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 spreadsheet_id = cliente_config["spreadsheet_id"]
                 atual          = svc.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range=f"'{sheet_name}'!N{row_num}",
+                    range=f"\'{sheet_name}\'!N{row_num}",
                 ).execute()
                 valor_atual = (atual.get("values") or [[""]])[0][0] if atual.get("values") else ""
                 if valor_atual == valor_n:
@@ -262,7 +246,7 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
                 svc.spreadsheets().values().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={"valueInputOption": "RAW", "data": [
-                        {"range": f"'{sheet_name}'!N{row_num}", "values": [[valor_n]]}
+                        {"range": f"\'{sheet_name}\'!N{row_num}", "values": [[valor_n]]}
                     ]},
                 ).execute()
                 log.info("DESPACHO OK | id=%s | N=%s | row=%d", id_oc, valor_n, row_num)
@@ -274,15 +258,14 @@ def executar_exportacao(cliente_id: str, cliente_config: dict, dry_run: bool = F
             despachados += 1
 
     resultado = {
-        "cliente":     cliente_id,
-        "inseridos":   inseridos,
+        "cliente": cliente_id,
+        "inseridos": inseridos,
         "atualizados": atualizados,
-        "herdados":    herdados,
+        "herdados": herdados,
         "despachados": despachados,
-        "dry_run":     dry_run,
+        "dry_run": dry_run,
     }
     log.info("[%s] exportação concluída | %s", cliente_id, resultado)
-    return resultado
 
 
 @router.post("/api/v1/exportar")
