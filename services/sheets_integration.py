@@ -308,6 +308,80 @@ def append_nova_ocorrencia(
         return False
 
 
+def append_heranca_diaria(
+    cliente_config: dict,
+    dados_ocorrencia: dict,
+    id_ocorrencia: str,
+    data_plantao: str = "",
+    dry_run: bool = False,
+) -> bool:
+    """
+    Registra herança diária de uma ocorrência pendente na planilha.
+
+    Quando uma ocorrência atravessa a virada do dia sem ser normalizada,
+    o próximo plantão a herda. Isso gera uma nova linha na planilha com:
+      - DATA_PLANTAO (col C) = data do novo plantão
+      - Início original preservado (cols G, H, I)
+      - Status = EM ATENDIMENTO
+      - Fim/tempo zerados (cols J, K, L, O)
+      - Mesmo ID_OCORRENCIA (col R) → _encontrar_linha retorna a última linha
+        (mais recente), então update_ocorrencia_normalizada atualiza esta.
+    """
+    spreadsheet_id = cliente_config["spreadsheet_id"]
+    sheet_name     = cliente_config["sheet_name"]
+
+    row = _montar_linha_nova(dados_ocorrencia, cliente_config, id_ocorrencia)
+
+    # C (índice 2) — DATA_PLANTAO → novo dia de referência
+    if data_plantao:
+        row[2] = _fmt_date(data_plantao)
+
+    # M (índice 12) — STATUS_ATUAL → sempre EM ATENDIMENTO na herança
+    row[12] = "EM ATENDIMENTO"
+
+    # J, K, L (índices 9–11) — fim → vazio (ainda não normalizado)
+    row[9]  = ""
+    row[10] = ""
+    row[11] = ""
+
+    # O (índice 14) — TEMPO ATENDIMENTO → vazio
+    row[14] = ""
+
+    log.info("HERANÇA | id=%s | data_plantao=%s | scn=%s | dry_run=%s",
+             id_ocorrencia, data_plantao, row[0], dry_run)
+
+    if dry_run:
+        log.info("DRY_RUN HERANÇA – linha que seria inserida: %s", row)
+        return True
+
+    service  = get_sheets_service()
+    range_a1 = f"'{sheet_name}'!A:R"
+
+    def _write():
+        return (
+            service.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=spreadsheet_id,
+                range=range_a1,
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [row]},
+            )
+            .execute()
+        )
+
+    try:
+        result = _retry(_write)
+        log.info("HERANÇA OK | id=%s | updates=%s",
+                 id_ocorrencia, result.get("updates", {}).get("updatedRows"))
+        _invalidar_cache_linha(spreadsheet_id, sheet_name)
+        return True
+    except Exception as exc:
+        log.error("HERANÇA FAIL | id=%s | erro=%s", id_ocorrencia, exc)
+        return False
+
+
 def update_ocorrencia_normalizada(
     cliente_config: dict,
     id_ocorrencia: str,
